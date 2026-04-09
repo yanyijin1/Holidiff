@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Logs and temporary files
+logs/
+*.log
+nohup.out
+*.tmp
+
+# Checkpoints and models
+checkpoints/
+*.pth
+*.pt
+
+# Data
+data/
+*.csv
+*.npy
+*.pkl
+
+# OS
+.DS_Store
+*.swp
+
+# IDE
+.vscode/
+.idea/

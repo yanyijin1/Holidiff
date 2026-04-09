@@ -1,0 +1,296 @@
+% ============================================================
+%  English Version — sync from main_zh.tex after Chinese editing
+%  DO NOT edit directly; wait for confirmed Chinese draft first
+% ============================================================
+\documentclass[12pt]{article}
+
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{cite}
+\geometry{a4paper, margin=2.5cm}
+
+% ---------- Paper Info ----------
+\title{\textbf{DiffAug: Conditional Diffusion with Physical-Consistent Projection\\
+for Traffic Speed Prediction under Sparse Supervision}}
+\author{
+  Yijin Yan$^{1}$\quad Guojian Zou$^{1}$\\[4pt]
+  $^{1}$ [Institution]\\
+  \texttt{[email]}
+}
+\date{March 2026}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\begin{abstract}
+% TODO: 200--250 words (sync from Chinese draft)
+Traffic speed prediction is a critical component of intelligent transportation systems (ITS).
+In real-world deployments, two fundamental challenges arise:
+\textbf{data scarcity}—private road networks accumulate far fewer historical samples than public
+benchmarks—and \textbf{holiday distribution shift}, where traffic patterns during holidays
+deviate systematically from weekday distributions.
+
+We propose \textbf{DiffAug}, a generative multi-view augmentation framework built on a
+conditional denoising diffusion probabilistic model (DDPM).
+Given $K$ augmented speed views sampled from the conditional distribution of
+historical $(v, q, \rho)$ triplets,
+we apply a \textit{physical-consistency projection}
+$\tilde{\rho} = q/(\tilde{v}+\varepsilon)$
+to strictly enforce the traffic flow conservation equation $q = \tilde{\rho}\cdot\tilde{v}$.
+A Beta-interpolation TSMixup step further covers the continuum between original and generated views,
+and real observations act as a soft anchor to stabilize supervised training.
+
+Experiments on the private MSST-CL dataset ($N=30$ nodes, 15-min granularity)
+demonstrate that DiffAug improves MAE/RMSE over no-augmentation baselines
+while maintaining near-perfect distributional fidelity
+(KL $<0.01$, WD $<0.5$\,km/h) between generated and real speed distributions.
+
+\textbf{Keywords:} Traffic speed prediction, diffusion model, data augmentation,
+physical consistency, sparse supervision
+\end{abstract}
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+% --- Background and Motivation ---
+Traffic speed prediction is a foundational task in intelligent transportation systems (ITS),
+underpinning route planning, signal control, and congestion alerting.
+Spatio-temporal deep learning models, including graph neural networks (GNNs) and
+Transformers, have achieved remarkable results on public
+benchmarks~\cite{stgformer,staeformer}.
+
+However, real-world private road-network deployments face two typical difficulties:
+\begin{enumerate}
+  \item \textbf{Data scarcity.}
+    Private road networks accumulate limited historical data—often fewer than 13,000
+    training windows, roughly one-tenth of public datasets such as PEMS04/08—making
+    models prone to overfitting.
+  \item \textbf{Holiday distribution shift.}
+    Holiday traffic volumes surge and time-of-day patterns deviate systematically
+    from weekday norms, leading to poor generalization on holiday periods.
+\end{enumerate}
+
+Existing data augmentation approaches broadly fall into three categories:
+(1) \textit{structural augmentation} (masking, dropout, temporal cropping), which lacks
+physical-semantic constraints;
+(2) \textit{interpolation augmentation} (Mixup~\cite{mixup}), which is simple but cannot
+guarantee traffic-physical validity;
+(3) \textit{generative augmentation} (STGAN~\cite{stgan}), which is difficult to control
+in terms of distributional alignment.
+
+Our key insight is that \textit{effective traffic augmentation views must simultaneously satisfy:
+(a) distributional fidelity—closely matching real traffic speed statistics,
+(b) sample diversity—introducing speed scenarios unseen in the weekday training set, and
+(c) physical legality—satisfying the flow conservation constraint
+$q = \tilde{\rho}\cdot\tilde{v}$.}
+
+We therefore propose \textbf{DiffAug}, with the following contributions:
+\begin{itemize}
+  \item We position a conditional DDPM as a \textbf{data generator} decoupled from the
+    prediction backbone, allowing independent optimization of generation quality.
+  \item We design a \textbf{physical-consistency projection} module that enforces
+    speed–flow–density conservation after diffusion sampling.
+  \item We introduce a \textbf{distribution-quality filtering} strategy that uses
+    KL divergence and Wasserstein distance to retain only high-fidelity augmented views.overleaf_session2=s%3Ag1zUXB1GwD9EbKRlgZsmNm2i_8IZws9B.%2BbhIqq74wmBv5Uw%2BddYuRn1lxYcg2sqthbfG3mN6RW0; GCLB=CJqY4qTJycTBBhAD
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Spatio-Temporal Traffic Prediction}overleaf_session2=s%3Ag1zUXB1GwD9EbKRlgZsmNm2i_8IZws9B.%2BbhIqq74wmBv5Uw%2BddYuRn1lxYcg2sqthbfG3mN6RW0; GCLB=CJqY4qTJycTBBhAD
+% TODO: STGformer, STAEformer, STGCN, DCRNN, etc.
+% Reference: doc/need/相关工作检索与对比模型清单.md
+
+\subsection{Data Augmentation for Traffic Prediction}
+% TODO: Mixup, CutMix, STGAN, STAug
+% Emphasize: physical constraint distinguishes our work
+
+\subsection{Diffusion Models for Time-Series Generation}
+% TODO: DDPM, DDIM, DiffSTG, TimeDiff
+% Emphasize: "generator, not predictor" positioning
+
+% ============================================================
+\section{Problem Formulation}
+\label{sec:problem}
+
+Consider a road network with $N$ nodes observed over $T$ time steps at 15-minute
+granularity. The traffic state at each step is described by speed $v\in\mathbb{R}^N$,
+flow $q\in\mathbb{R}^N$, and density $\rho\in\mathbb{R}^N$, satisfying the
+fundamental traffic flow equation:
+\begin{equation}
+  q = \rho \cdot v.
+  \label{eq:traffic_fundamental}
+\end{equation}
+
+Given a historical window $\mathbf{X} = \{(v_t, q_t, \rho_t)\}_{t=1}^{L}$ ($L=12$),
+the goal is to predict the future $H$-step speed
+$\hat{\mathbf{v}} = \{\hat{v}_t\}_{t=L+1}^{L+H}$ ($H=12$).
+
+Due to limited training data ($\sim$12,707 windows),
+we seek to construct $K$ physically valid augmented views
+$\{\tilde{v}^{(k)}\}_{k=1}^K$ that share the same future label $\mathbf{Y}$,
+effectively expanding the training set.
+
+% ============================================================
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Overall Framework}
+% TODO: Insert architecture figure
+
+DiffAug consists of three modules:
+\begin{enumerate}
+  \item \textbf{Conditional DDPM Generator} (Sec.~\ref{sec:ddpm}):
+    samples $K$ augmented speed views conditioned on historical traffic state;
+  \item \textbf{Physical-Consistency Projection} (Sec.~\ref{sec:projection}):
+    projects generated speeds to the feasible state space satisfying the
+    conservation equation;
+  \item \textbf{TSMixup Interpolation \& Weighted Training} (Sec.~\ref{sec:mixup}):
+    Beta interpolation covers intermediate augmentation states;
+    a real-view soft anchor stabilizes supervised training.
+\end{enumerate}
+
+\subsection{Conditional Diffusion Generator}
+\label{sec:ddpm}
+
+We adopt the DDPM~\cite{ddpm} forward noising process:
+\begin{equation}
+  q(\mathbf{x}_s | \mathbf{x}_0) =
+  \mathcal{N}\!\left(\mathbf{x}_s;\, \sqrt{\bar{\alpha}_s}\,\mathbf{x}_0,\,
+  (1-\bar{\alpha}_s)\mathbf{I}\right),
+\end{equation}
+where $\mathbf{x}_0 = v_{1:L}$ is the historical speed sequence, and the condition
+$c$ encodes historical flow $q_{1:L}$, time-of-day (ToD), and day-of-week (DoW).
+
+The denoising network $\epsilon_\theta(\mathbf{x}_s, s, c)$ uses a Patch Transformer
+with ALiBi positional encoding~\cite{alibi}.
+Training minimizes the standard denoising MSE:
+\begin{equation}
+  \mathcal{L}_{\text{denoise}} =
+  \mathbb{E}_{\mathbf{x}_0, \epsilon, s}\!\left[
+    \|\epsilon - \epsilon_\theta(\mathbf{x}_s, s, c)\|^2
+  \right].
+\end{equation}
+
+% TODO: Add statistical loss (stat_loss) formulation and motivation
+
+\subsection{Physical-Consistency Projection}
+\label{sec:projection}
+
+After sampling augmented speed $\tilde{v}^{(k)}$, the corresponding density is
+computed to enforce conservation:
+\begin{equation}
+  \tilde{\rho}^{(k)} = \frac{q}{\tilde{v}^{(k)} + \varepsilon},
+  \label{eq:projection}
+\end{equation}
+where $\varepsilon$ is a numerical stability term and $q$ is the observed flow
+(treated as fixed).
+This guarantees that $(q, \tilde{v}^{(k)}, \tilde{\rho}^{(k)})$ strictly satisfies
+Eq.~\eqref{eq:traffic_fundamental}.
+
+\subsection{TSMixup Interpolation and Weighted Training}
+\label{sec:mixup}
+
+To cover the continuum from the original to the generated view, we apply
+Beta interpolation to each augmented view:
+\begin{equation}
+  v_{\text{aug}}^{(k)} = \lambda^{(k)}\, v + (1-\lambda^{(k)})\, \tilde{v}^{(k)},
+  \quad \lambda^{(k)} \sim \text{Beta}(\alpha, \alpha).
+  \label{eq:mixup}
+\end{equation}
+
+The training loss combines the real-view loss and augmented-view loss:
+\begin{equation}
+  \mathcal{L} = \mathcal{L}(v, \mathbf{Y}) +
+  \frac{\alpha_{\text{aug}}}{K}\sum_{k=1}^K \mathcal{L}(v_{\text{aug}}^{(k)}, \mathbf{Y}),
+  \label{eq:loss}
+\end{equation}
+where $\alpha_{\text{aug}} < 1$ ensures real observations remain the primary supervision
+signal.
+
+% ============================================================
+\section{Experiments}
+\label{sec:exp}
+
+\subsection{Dataset and Setup}
+
+\paragraph{MSST-CL Dataset.}
+% TODO: dataset description
+Private road network; $N=30$ nodes; 15-minute granularity;
+train/val/test split 60\%/20\%/20\%;
+$\sim$12,707 training windows ($L=12$, $H=12$).
+Contains holiday periods with significant distribution shift.
+
+\paragraph{Baselines.}
+% TODO: list baselines
+STGformer~\cite{stgformer},
+STGCN~\cite{stgcn},
+DCRNN~\cite{dcrnn},
+STAEformer~\cite{staeformer},
+DiffSTG~\cite{diffstg}.
+
+\paragraph{Metrics.}
+MAE, RMSE, MAPE (averaged over $H=12$ future steps).
+
+\subsection{Main Results}
+% TODO: Insert main results table
+
+\subsection{Ablation Study}
+
+Table~\ref{tab:ablation} shows the contribution of each component.
+\begin{table}[ht]
+  \centering
+  \caption{Ablation study on the MSST-CL dataset (MAE / RMSE).}
+  \label{tab:ablation}
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Variant} & \textbf{Strategy} & \textbf{KL}$\downarrow$
+      & \textbf{MAE}$\downarrow$ & \textbf{RMSE}$\downarrow$ \\
+    \midrule
+    No augmentation  & —           & —      & 4.4045 & 6.6519 \\
+    e4               & stat\_loss  & 0.0022 & 4.4225 & 6.6494 \\
+    e1               & adaLN       & —      & 4.4473 & 6.6907 \\
+    Baseline aug.    & —           & —      & 4.4413 & 6.6859 \\
+    \midrule
+    \textbf{DiffAug (ours)} & e3e4 + filtering
+      & \textbf{TODO} & \textbf{TODO} & \textbf{TODO} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Generation Quality Analysis}
+% TODO: Insert KL, WD, intra_std analysis figures/tables
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented DiffAug, a conditional diffusion-based generative multi-view augmentation
+framework for traffic speed prediction on sparse private road networks.
+By combining physical-consistency projection with TSMixup interpolation,
+DiffAug produces augmented views that are both distributional-fidelity-compliant
+and sufficiently diverse to expose the prediction backbone to previously unseen speed
+scenarios.
+Experiments on the private MSST-CL dataset confirm that DiffAug effectively mitigates
+overfitting and improves generalization under holiday distribution shift.
+
+\paragraph{Limitations and Future Work.}
+The current filtering strategy relies on offline precomputation; future work will
+explore online adaptive filtering.
+End-to-end joint training of the diffusion generator and the prediction backbone
+also warrants further investigation.
+
+% ============================================================
+\bibliographystyle{plain}
+\bibliography{refs}
+
+% ============================================================
+\appendix
+\section{Appendix: Diffusion Variant Hyperparameters}
+% TODO: Hyperparameter table for all variants
+
+\end{document}

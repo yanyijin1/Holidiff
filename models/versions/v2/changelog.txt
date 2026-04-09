@@ -1,0 +1,21 @@
+# Changelog v2 - TST 扩散训练通过
+
+## 状态: 训练通过 ✅ (Epoch 2 Vali Loss: 0.652488)
+
+## 主要改动
+- FormerBone_TST 替代 SimDiff U-Net attention，使用 TSTBlock 做时空联合建模
+- forward_train/forward_val_test 各环节维度对齐 SimDiff
+- PatchUVIT.rearrange 修正：timesteps unsqueeze 两次
+- 所有 debug print 已移除
+
+## 遗留问题（后续处理）
+1. **weight_tmp 形状**: PTLD=(B*N,1,1) vs SimDiff=(B*N,12,1) —— trainer 里如何使用待确认
+2. **forward_val_test 差异**: x_dec 全量传入 vs SimDiff 只取 pred_len；agg 逻辑差异
+
+## 使用的 TST 组件
+- TSTBlock (temporal attention + spatial LWR operator) 替代 U-Net attention 层
+- e_layers = 1
+
+## 文件结构
+- models/fourier/ptld_model.py (主模型)
+- models/versions/v2/ (备份)
