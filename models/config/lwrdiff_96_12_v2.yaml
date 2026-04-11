@@ -1,13 +1,13 @@
 # LWRDiff Training Configuration - pred_len=12
 # Based on need/LWRdiff/script/train_msst_speed.yaml
-# STFormerBone Phase 1 测试
+# STFormerBone Phase 2 测试 - 轻量化模型
 
 experiment:
   name: lwrdiff_train_stformer
   task_name: long_term_forecast
   model: LWRdiff
-  model_id: lwrdiff_96_12_stformer
-  des: stformer_phase1_skeleton
+  model_id: lwrdiff_96_12_stformer_v2
+  des: stformer_phase2_lightweight
   itr: 1
   seed: 42
 
@@ -37,21 +37,22 @@ window:
   label_len: 48
   pred_len: 12
 
+# 轻量化模型参数 (方案A)
 model_args:
   e_layers: 1
-  d_model: 128
-  num_heads: 8
+  d_model: 64      # 128 -> 64 (-50%)
+  num_heads: 4     # 8 -> 4 (-50%)
   stride: 3
   patch_len: 6
-  dropout: 0.0
-  skip_dropout: 0.3
-  d_ff: 512
+  dropout: 0.1    # 0.0 -> 0.1 (正则化)
+  skip_dropout: 0.1  # 0.3 -> 0.1
+  d_ff: 256       # 512 -> 256 (-50%)
 
 optimization:
   batch_size: 32
-  train_epochs: 10  # 测试 Phase 1 骨架
-  patience: 5
-  learning_rate: 0.0001
+  train_epochs: 15
+  patience: 8
+  learning_rate: 0.0005  # 0.0001 -> 0.0005 (轻量模型需要稍高学习率)
   loss_type: MAE
 
 sampling:
@@ -71,4 +72,4 @@ sampling:
   coss: 0.008
 
 metrics:
-  use_dtw: false  # Set to true to enable DTW metric (time consuming)
+  use_dtw: false

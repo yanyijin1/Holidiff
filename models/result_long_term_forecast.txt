@@ -1,0 +1,6 @@
+long_term_forecast_lwrdiff_96_12_stformer_v2_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_stformer_phase2_lightweight_0  
+mse:0.7742944359779358, mae:0.6209236979484558, rmse:0.8799400329589844, mape:3.403768539428711, mspe:7221.47607421875
+
+long_term_forecast_lwrdiff_96_12_stformer_v2_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_stformer_phase2_lightweight_0  
+mse:0.7742944359779358, mae:0.6209236979484558, rmse:0.8799400329589844, mape:3.403768539428711, mspe:7221.47607421875
+

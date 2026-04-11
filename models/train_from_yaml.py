@@ -144,6 +144,11 @@ def yaml_to_args(config):
     args.graph_adj_path = graph_cfg.get('adj_path', None)
     args.graph_num_nodes = graph_cfg.get('num_nodes', None)
     
+    # 模型切换配置
+    switch_cfg = cfg.get('model_switch', config.get('model_switch', {}))
+    args.use_stformer = switch_cfg.get('use_stformer', False)
+    args.st_layers = switch_cfg.get('st_layers', 3)
+    
     return args
 
 

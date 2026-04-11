@@ -1,207 +1,179 @@
-# STFormerBone 实施指导
+# STFormerBone 实施指导 v0.6
 
-> 版本: v0.2
+> 版本: v0.6
 > 日期: 2026-04-11
-> 目标：渐进式迁移，每步可验收、可回滚
+> 目标：新建 stformer_bone/ 文件夹，与 fourier/ 同级，逐步实现时空联合扩散架构
 
 ---
 
-## 一、实施原则
+## 一、实验结果汇总
 
-1. **每步可运行**：每个 Phase 完成后代码都能跑通
-2. **每步可对比**：有明确的基线对比指标
-3. **每步可回滚**：出问题时能回到上一个稳定版本
-4. **逐步启用**：功能从简到繁，不跳跃
+### 1.1 指标对比
 
----
+| Phase | 架构 | MSE | MAE | RMSE | 训练时间/epoch |
+|-------|------|-----|------|------|----------------|
+| P1 | Identity（骨架） | 0.889 | 0.687 | 0.943 | ~4s |
+| P2 | TemporalAttn（时序） | **0.770** | **0.619** | **0.878** | ~11s |
+| **P3** | **ST-Joint（时空联合）** | **0.771** | **0.620** | **0.878** | ~15s |
 
-## 二、Phase 0: 基线记录
+### 1.2 消融分析
 
-### 目标
-确认现有 FormerBone 正常工作，记录基线指标
+| 阶段 | vs 基线 (P1) | 提升 |
+|------|-------------|------|
+| P2 时序分支 | MSE 0.889 → 0.770 | ↓13.4% |
+| P3 时空联合 | MSE 0.770 → 0.771 | 基本持平 |
 
-### 操作
-1. 运行现有训练 10 epoch，记录 loss 曲线
-2. 运行测试，记录 MAE/MSE 指标
-3. **git commit 当前状态**：`git add . && git commit -m "baseline: FormerBone working"`
-
-### 验收标准
-- [ ] 训练 10 epoch 无 NaN/Inf
-- [ ] 测试输出合理数值范围
-- [ ] 指标记录在笔记中（如 MAE ≈ 1.6）
-
-### 失败处理
-若失败 → 检查数据加载、归一化代码，不进入下一阶段
+**分析**：
+- 时序分支带来显著提升（RotaryAttn 无掩码注意力）
+- 空间分支在当前配置下增益有限，可能原因：
+  1. 图结构信息未被充分利用
+  2. 门控机制尚未完全发挥（当前 P3 已整合门控）
+  3. 需要更多 epoch 或调参
 
 ---
 
-## 三、Phase 1: 接口对齐
+## 二、目录结构
 
-### 目标
-创建 `stformer_bone.py`，保持与 FormerBone **完全相同的输入输出接口**
-
-### 操作
-1. 创建 `models/fourier/stformer_bone.py`
-2. 实现 **最小版本**：
-   - 输入/输出层复制自 `unet_bone.py`
-   - 中间层用 `nn.Identity()` 占位（透传）
-   - 时间注入：加法（不同于拼接，后续再改）
-
-3. 修改 `model.py`：添加 `use_stformer` 开关
-   ```python
-   if getattr(configs, 'use_stformer', False):
-       from .stformer_bone import PatchUVIT_STFormer
-       self.nn = PatchUVIT_STFormer(configs)
-   else:
-       from .unet_bone import PatchUVIT
-       self.nn = PatchUVIT(configs)
-   ```
-
-4. 添加配置项（yaml）：
-   ```yaml
-   use_stformer: false  # 默认关闭
-   ```
-
-### 验收标准
-- [ ] `use_stformer: false` 时，结果与 Phase 0 **完全一致**（MSE 差异 < 0.001）
-- [ ] `use_stformer: true` 时，能跑通一个 batch
-- [ ] 输出维度正确：输入 `(B*N, 12)` → 输出 `(B*N, 12)`
-
-### 失败处理
-- 维度报错 → 检查 reshape/unfold 逻辑
-- 结果不一致 → 检查 `use_stformer: false` 分支是否正确
+```
+models/
+├── fourier/              # 原文件（保留不动）
+│   ├── unet_bone.py     # FormerBone 原始实现
+│   ├── model.py         # 原始 Model 类
+│   └── ...
+│
+├── stformer_bone/       # 新建（已实现）
+│   ├── FormerBone.py    # STFormerBone 主干（Phase 1-3）
+│   ├── Model.py         # Model 类
+│   ├── diffusion.py     # 复制自 fourier
+│   ├── temporal.py      # Phase 2: 时序分支 ✅
+│   ├── spatial.py       # Phase 3: 空间分支 ✅
+│   └── gate.py          # Phase 3: 门控机制 ✅
+│
+└── doc/
+    └── STFormerBone实施指导.md
+```
 
 ---
 
-## 四、Phase 2: 时序分支验证
+## 三、Phase 1: 骨架版本 ✅
 
-### 目标
-实现时序分支（RotaryAttn），空间分支暂时跳过（D=I）
+### 结果
+- MSE: 0.889, MAE: 0.687
+- 中间层用 `nn.Identity()` 透传
 
-### 操作
-1. 在 `STJointLayer` 中实现：
-   - Pre-LN: `nn.LayerNorm`
-   - 时序分支：`TemporalAttention`（无因果掩码）
-   - 空间分支：`h_s = 0`（跳过）
-   - 门控：`gate = 0.5`（固定）
-
-2. 配置开关：
-   ```yaml
-   use_stformer: true
-   st_layers: 3
-   ```
-
-3. 训练 10 epoch，与 Phase 0 基线对比
-
-### 验收标准
-- [ ] 训练收敛，loss 下降曲线正常
-- [ ] MAE 与基线差距 < 5%（说明时序分支正确）
-- [ ] 梯度 norm 在 0.1~10 范围（不爆炸/不消失）
-
-### 失败处理
-- 收敛慢 → 检查学习率
-- 梯度异常 → 检查 Pre-LN 实现
+### 关键设计
+- 时间注入：`h = h + time_embed`（加法广播）
+- Patch Embedding：unfold + Linear
+- 输出投影：`nn.Linear(P_x * d_model, pred_len)`
 
 ---
 
-## 五、Phase 3: 空间分支验证
+## 四、Phase 2: 时序分支 ✅
 
-### 目标
-加入真实 D 矩阵，验证空间分支有效
+### 结果
+- MSE: **0.770** (↓13.4%), MAE: **0.619** (↓9.9%)
+- 训练时间增加 ~3x（11s vs 4s）
 
-### 操作
-1. 从 `utils/graph.py` 加载 D 矩阵
-2. 在 `STJointLayer` 中实现：
-   - 空间分支：`q_spatial = D @ q_proj(h)`
-   - `spatial_alpha` 初始为 0.1（弱权重）
+### TemporalAttention 关键特性
+- Pre-LN 结构
+- RotaryEmbedding（无因果掩码）
+- 全注意力机制（纯扩散）
+- FFN 残差连接
 
-3. 消融实验：
-   - 实验 A：D=I（纯时序）
-   - 实验 B：D=真实（弱空间，α=0.1）
-   - 实验 C：D=真实（强空间，α=1.0）
-
-### 验收标准
-- [ ] 实验 C 优于实验 A（空间分支有效）
-- [ ] gate 值在 0.3~0.7 之间（不饱和）
-- [ ] 门控可视化：自由流区域 gate 高，拥堵区域 gate 低
-
-### 失败处理
-- 性能下降 → 减小 `spatial_alpha` 到 0.01
-- gate 饱和 → 检查 Sigmoid 初始化
+### 代码位置
+`stformer_bone/temporal.py`
 
 ---
 
-## 六、Phase 4: 门控训练
+## 五、Phase 3: 时空联合 ✅
 
-### 目标
-启用可学习门控，完成完整 STFormerBone
+### 结果
+- MSE: 0.771, MAE: 0.620
+- 训练时间 ~15s/epoch
 
-### 操作
-1. 门控从固定 0.5 改为可训练
-2. 可调参数实验：
-   ```yaml
-   st_layers: [3, 5, 7]  # 测试不同深度
-   gate_dropout: [0.0, 0.1]  # 防止过拟合
-   ```
+### STJointLayer 架构
+```
+H^{(l+1)} = H^{(l)} + gate ⊗ H_T + (1-gate) ⊗ H_S
 
-3. A/B 测试：与 FormerBone 对比所有指标
+其中：
+- H_T = TemporalAttention(H^{(l)})     # 时序分支
+- H_S = SpatialPropagation(H^{(l)})    # 空间分支
+- gate = σ(W_g · Concat[H_T, H_S])    # 向量级门控
+```
 
-### 验收标准
-- [ ] MAE ≤ FormerBone（或差距 < 5%）
-- [ ] 训练时间增加 < 50%
-- [ ] 显存增加 < 30%
+### SpatialPropagation 关键特性
+- D @ Q 操作（LWR 物理先验）
+- D = I - S^T（拓扑后向差分算子）
+- 可学习参数 `spatial_alpha` 控制传播强度
 
-### 失败处理
-- 性能不达标 → 回到 Phase 2 检查基础实现
-- 训练不稳定 → 增加 Dropout 或减小学习率
+### 代码位置
+- `stformer_bone/gate.py` - STJointLayer
+- `stformer_bone/spatial.py` - SpatialPropagation
 
 ---
 
-## 七、代码修改清单
+## 六、后续优化方向
 
-| 文件 | 修改内容 | 阶段 |
-|------|----------|------|
-| **新建** `stformer_bone.py` | STJointLayer, STFormerBone | P1 |
-| `model.py` | 添加 `use_stformer` 开关 | P1 |
-| `unet_bone.py` | 无需修改（保留备选） | - |
+### 6.1 图结构增强
+- 检查 D 矩阵是否正确加载
+- 尝试不同的图结构（上游/下游/双向）
+
+### 6.2 门控机制优化
+- 调整门控网络结构
+- 尝试不同的融合方式
+
+### 6.3 层数消融
+- 测试 st_layers = 5, 7 的效果
+- 当前使用 st_layers = 3
+
+### 6.4 对比 FormerBone
+- 在相同配置下对比原 fourier 架构
+- 验证 STFormerBone 优势
+
+---
+
+## 七、验收清单
+
+| 阶段 | 验收项 | 结果 |
+|------|--------|------|
+| P1 | 骨架运行，能跑通一个 batch | ✅ |
+| P1 | 维度正确，输出 (B*N, pred_len) | ✅ |
+| P2 | 时序收敛，MAE 下降 | ✅ MSE↓13.4% |
+| P3 | 时空联合，MAE ≤ P2 | ⚠️ 基本持平 |
+| P4 | 最终对比，MAE ≤ FormerBone | 待测试 |
 
 ---
 
 ## 八、配置项汇总
 
 ```yaml
-# 模型选择
-use_stformer: false  # P1: false, P2+: true
-
-# STFormerBone 专属
+# stformer_bone 专属
 st_layers: 3          # 可调 3/5/7
-d_model: 128          # 与原配置一致
-num_heads: 8          # 与原配置一致
-dropout: 0.1          # 与原配置一致
-gate_dropout: 0.1     # P4 调参
-spatial_alpha_init: 0.1  # P3 初始值
+use_stformer: true     # 切换模型
+
+# graph 配置
+graph:
+  enabled: true
+  adj_path: /root/yanyijin/STdiff/models/data/adjacent_gantry.csv
+  num_nodes: 30
 ```
 
 ---
 
-## 九、git 提交规范
+## 九、测试命令
 
-| 阶段 | 提交信息 |
-|------|----------|
-| P0 | `git commit -m "baseline: FormerBone working"` |
-| P1 | `git commit -m "feat: add stformer_bone.py interface"` |
-| P2 | `git commit -m "feat: add temporal branch to STJointLayer"` |
-| P3 | `git commit -m "feat: add spatial branch to STJointLayer"` |
-| P4 | `git commit -m "feat: complete STFormerBone with trainable gate"` |
+```bash
+# Phase 2 测试（时序分支）
+cd /root/yanyijin/STdiff
+conda activate holiday
+python models/train_from_yaml.py --config models/config/lwrdiff_96_12.yaml
+```
 
 ---
 
-## 十、总结：每步做什么、做到什么
+## 十、下一步
 
-| 阶段 | 做什么 | 做到什么（验收） |
-|------|--------|------------------|
-| **P0** | 记录基线 | 训练正常、指标记录 |
-| **P1** | 创建空壳 | 接口对齐、开关可控 |
-| **P2** | 加时序分支 | 收敛、性能接近基线 |
-| **P3** | 加空间分支 | 空间有效、性能提升 |
-| **P4** | 完整训练 | 全面对比、指标达标 |
+1. **消融实验**：测试 `D = I`（纯时序）vs `D = 真实`
+2. **层数消融**：st_layers = 3 vs 5 vs 7
+3. **对比原版**：使用 fourier 架构训练相同 epoch
+4. **调参优化**：调整 learning_rate, dropout 等

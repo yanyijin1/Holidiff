@@ -73,8 +73,15 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         self.model = self._build_model()
 
     def _build_model(self):
-        from fourier.ptld_model import Model
-        model = Model(self.args).float()
+        # 根据 use_stformer 配置选择不同的模型
+        use_stformer = getattr(self.args, 'use_stformer', False)
+        
+        if use_stformer:
+            from stformer_bone.Model import Model as STFormerModel
+            model = STFormerModel(self.args).float()
+        else:
+            from fourier.ptld_model import Model
+            model = Model(self.args).float()
 
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
