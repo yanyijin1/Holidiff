@@ -1,0 +1,9 @@
+long_term_forecast_lwrdiff_96_12_stformer_LWRdiff_custom_ftM_sl96_ll48_pl12_dm128_nh8_el1_dl1_df512_ebtimeF_stformer_phase1_skeleton_0  
+mse:0.8890148401260376, mae:0.6865859031677246, rmse:0.942875862121582, mape:2.194317579269409, mspe:4752.0439453125
+
+long_term_forecast_lwrdiff_96_12_stformer_LWRdiff_custom_ftM_sl96_ll48_pl12_dm128_nh8_el1_dl1_df512_ebtimeF_stformer_phase1_skeleton_0  
+mse:0.770103394985199, mae:0.618553638458252, rmse:0.8775553703308105, mape:3.0883736610412598, mspe:6153.11767578125
+
+long_term_forecast_lwrdiff_96_12_stformer_LWRdiff_custom_ftM_sl96_ll48_pl12_dm128_nh8_el1_dl1_df512_ebtimeF_stformer_phase1_skeleton_0  
+mse:0.771394670009613, mae:0.6203048825263977, rmse:0.8782907724380493, mape:3.1030688285827637, mspe:5493.95947265625
+
