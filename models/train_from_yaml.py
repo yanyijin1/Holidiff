@@ -128,7 +128,22 @@ def yaml_to_args(config):
     args.inverse = False
     args.checkpoints = './checkpoints/'
     args.augmentation_ratio = 0
-
+    
+    # Metrics - DTW
+    misc_cfg = cfg.get('metrics', {})
+    args.use_dtw = misc_cfg.get('use_dtw', False)
+    
+    # MoE / Expert
+    moe_cfg = cfg.get('moe', {})
+    args.num_experts = moe_cfg.get('num_experts', 8)
+    args.moe_enabled = moe_cfg.get('enabled', False)
+    
+    # Graph
+    graph_cfg = cfg.get('graph', {})
+    args.graph_enabled = graph_cfg.get('enabled', False)
+    args.graph_adj_path = graph_cfg.get('adj_path', None)
+    args.graph_num_nodes = graph_cfg.get('num_nodes', None)
+    
     return args
 
 

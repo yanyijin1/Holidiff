@@ -1,6 +1,6 @@
-# Version: v0.1-trainer (Exact match with LWRdiff original)
-# Date: 2026-04-07
-# Description: Trainer - Copy from LWRdiff
+# Version: v0.2-trainer (Add DTW metric support)
+# Date: 2026-04-11
+# Description: Trainer - Add DTW metric support
 
 import os
 import torch
@@ -10,16 +10,27 @@ import warnings
 import numpy as np
 import time
 import math
+import argparse
 
 from data_loader import data_provider
 from utils.tools import EarlyStopping, adjust_learning_rate
-from utils.metrics import metric
+from utils.metrics import metric, metric_with_dtw, dtw_metric
 
 warnings.filterwarnings('ignore')
 
 
 def l1loss(pred, target):
     return (target - pred).abs().mean()
+
+
+class Args:
+    """简单的参数类，用于从yaml转换"""
+    def __init__(self):
+        self.use_gpu = True
+        self.gpu = 0
+        self.use_multi_gpu = False
+        self.devices = '0,1'
+        self.device_ids = [0]
 
 
 class Exp_Basic(object):
@@ -307,12 +318,24 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         f = open("result_long_term_forecast.txt", 'a')
         f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}, rmse:{}, mape:{}, mspe:{}'.format(mse, mae, rmse, mape, mspe))
+        
+        if hasattr(self.args, 'use_dtw') and self.args.use_dtw:
+            # 使用DTW指标
+            metrics = metric_with_dtw(preds, trues, use_dtw=True, use_accelerated_dtw=True)
+            f.write('mse:{}, mae:{}, rmse:{}, mape:{}, mspe:{}, dtw:{}'.format(
+                metrics['mse'], metrics['mae'], metrics['rmse'], 
+                metrics['mape'], metrics['mspe'], metrics['dtw']))
+            np.save(folder_path + 'metrics.npy', np.array([
+                metrics['mae'], metrics['mse'], metrics['rmse'], 
+                metrics['mape'], metrics['mspe'], metrics['dtw']]))
+        else:
+            # 标准指标
+            f.write('mse:{}, mae:{}, rmse:{}, mape:{}, mspe:{}'.format(mse, mae, rmse, mape, mspe))
+            np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        
         f.write('\n')
         f.write('\n')
         f.close()
-
-        np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
 

@@ -63,3 +63,6 @@ sampling:
   rmom: 20
   n_b: 5
   coss: 0.008
+
+metrics:
+  use_dtw: false  # Set to true to enable DTW metric (time consuming)
