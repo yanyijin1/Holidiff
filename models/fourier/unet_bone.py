@@ -180,33 +180,43 @@ class FormerBone(nn.Module):
         # T-Fusion：最后的时间融合层
         self.t_fusion = Attenion(configs)
 
-    def forward(self, x, timesteps, cond_ts, x_mark_enc=None):
+    def forward(self, x, timesteps, cond_ts, x_mark_enc=None, *configs, **kwargs):
         """
         架构：T-Down × e_layers → T-Mid → T-Up × e_layers → S-LWR → T-Fusion
         
         Args:
-            x: (B, N, T) - 输入噪声序列
-            timesteps: (B, N) - 时间步
-            cond_ts: (B, N, L) - 条件序列
+            x: (B*N, T) - 输入噪声序列 (展平后)
+            timesteps: (B*N,) - 时间步
+            cond_ts: (B*N, L) - 条件序列
         
         Returns:
             z_out: (B*N, pred_len) - 输出预测
         """
+        print("\n========== FormerBone.forward ==========")
+        print(f"[INPUT] x: {x.shape}, timesteps: {timesteps.shape}, cond_ts: {cond_ts.shape}")
+        
         b, c, s = x.shape
+        print(f"[AFTER SHAPE] b={b}, c={c}, s={s}")
 
         # SimDiff 风格：使用 unfold 进行 patch 化
         zcube0 = cond_ts.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         zcube1 = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
+        print(f"[UNFOLD] zcube0: {zcube0.shape}, zcube1: {zcube1.shape}")
         zcube = torch.cat([zcube0, zcube1], dim=-2)
+        print(f"[CAT] zcube: {zcube.shape}")
 
         z_embed = self.input_dropout(self.W_input_projection(zcube))
+        print(f"[PROJECTION] z_embed: {z_embed.shape}")
 
         # 时间 token
         time_token = self.cls(timesteps.float())
+        print(f"[TIME_TOKEN] time_token: {time_token.shape}")
         z_embed = torch.cat((time_token, z_embed), dim=-2)
+        print(f"[CAT TIME] z_embed: {z_embed.shape}")
 
         inputs = z_embed
         b, c, t, h = inputs.shape
+        print(f"[AFTER CAT] b={b}, c={c}, t={t}, h={h}")
 
         # ========== T-Down：编码阶段 ==========
         skip = []
@@ -234,13 +244,19 @@ class FormerBone(nn.Module):
             inputs = drop(output)
 
         # ========== S-LWR：空间传播 ==========
+        print(f"[BEFORE S-LWR] inputs: {inputs.shape}")
         inputs = self.spatial_layer(inputs)
+        print(f"[AFTER S-LWR] inputs: {inputs.shape}")
 
         # ========== T-Fusion：时间融合 ==========
+        print(f"[BEFORE T-FUSION] inputs: {inputs.shape}")
         output = self.t_fusion(inputs)
+        print(f"[AFTER T-FUSION] output: {output.shape}")
 
         # 输出映射
+        print(f"[BEFORE W_OUTS] output: {output.shape}")
         z_out = self.W_outs(output[:, :, :, :].reshape(b, c, -1)).reshape(b * c, -1)
+        print(f"[FINAL] z_out: {z_out.shape}")
 
         return z_out
 
@@ -253,8 +269,19 @@ class PatchUVIT(nn.Module):
         self.enc_in = configs.enc_in
 
     def forward(self, x, timesteps, cond_ts, x_mark_enc=None, *configs, **kwargs):
+        """
+        PatchUVIT Wrapper Forward
+        输入: x=(B*N, T), timesteps=(B*N,), cond_ts=(B*N, L)
+        输出: z_out=(B*N, pred_len)
+        """
+        print("\n========== PatchUVIT.forward ==========")
+        print(f"[INPUT] x: {x.shape}, timesteps: {timesteps.shape}, cond_ts: {cond_ts.shape}")
+        
         x = rearrange(x, '(b n) h -> b n h', n=self.enc_in)
         cond_ts = rearrange(cond_ts, '(b n) h -> b n h', n=self.enc_in)
         timesteps = rearrange(timesteps, '(b n) -> b n', n=self.enc_in).unsqueeze(-1).unsqueeze(-1)
+        print(f"[AFTER REARRANGE] x: {x.shape}, cond_ts: {cond_ts.shape}, timesteps: {timesteps.shape}")
+        
         x = self.model(x, timesteps, cond_ts)
+        print(f"[AFTER MODEL] x: {x.shape}")
         return x
