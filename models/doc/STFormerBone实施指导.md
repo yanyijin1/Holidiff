@@ -1,258 +1,207 @@
 # STFormerBone 实施指导
 
-> 基于现有代码风格，渐进式迁移
+> 版本: v0.2
+> 日期: 2026-04-11
+> 目标：渐进式迁移，每步可验收、可回滚
 
 ---
 
-## 一、代码修改清单
+## 一、实施原则
 
-| 阶段 | 文件 | 修改内容 |
-|------|------|----------|
-| **新建** | `fourier/stformer_bone.py` | STFormerBone 主干网络 |
-| **修改** | `fourier/model.py` | 添加模型切换开关 |
-
----
-
-## 二、Phase 1: 创建 stformer_bone.py
-
-### 2.1 核心类结构
-
-```python
-"""
-STFormerBone: 时空联合扩散骨干网络
-"""
-import torch
-import torch.nn as nn
-from einops import rearrange
-from layers.rotaryembedding import RotaryEmbedding
-from utils.graph import build_d_matrix_from_adjacency
-
-
-class STJointLayer(nn.Module):
-    """时空联合层"""
-    def __init__(self, d_model, num_heads, n_vars, configs):
-        super().__init__()
-        self.d_model = d_model
-        self.n_vars = n_vars
-
-        # Pre-LN
-        self.norm = nn.LayerNorm(d_model)
-
-        # 时序分支：RotaryAttn（无因果掩码）
-        self.num_heads = num_heads
-        self.head_dim = d_model // num_heads
-        self.qkv = nn.Linear(d_model, d_model * 3)
-        self.rotary_emb = RotaryEmbedding(dim=self.head_dim // 2)
-        self.proj = nn.Linear(d_model, d_model)
-
-        # 空间分支：D @ Q
-        self.q_proj = nn.Linear(d_model, d_model)
-        self.update = nn.Linear(d_model, d_model)
-
-        # 门控：向量级
-        self.gate = nn.Sequential(
-            nn.Linear(d_model * 2, d_model),
-            nn.Sigmoid()
-        )
-
-    def forward(self, h):
-        """h: (B, N, P, d)"""
-        residual = h
-        h = self.norm(h)
-
-        # ===== 时序分支 =====
-        B, N, P, d = h.shape
-        # reshape for attention: (B, N, P, d) -> (B*N, P, d) or (B*P, N, d)
-        # 这里取 (B*N*P, d) 做 self-attention
-        h_flat = h.reshape(B * N * P, 1, d)  # 相当于每个位置独立处理
-
-        # 标准 attention 实现（保持现有风格）
-        qkv = self.qkv(h).reshape(B, N, P, 3, self.num_heads, d // self.num_heads)
-        qkv = qkv.permute(3, 0, 1, 4, 2, 5)  # (3, B, N, heads, P, head_dim)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        q = q.reshape(B * N, self.num_heads, P, self.head_dim)
-        k = k.reshape(B * N, self.num_heads, P, self.head_dim)
-        v = v.reshape(B * N, self.num_heads, P, self.head_dim)
-
-        q = self.rotary_emb.rotate_queries_or_keys(q)
-        k = self.rotary_emb.rotate_queries_or_keys(k)
-
-        # 无因果掩码（纯扩散）
-        if hasattr(torch.nn.functional, "scaled_dot_product_attention"):
-            attn = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-        else:
-            scale = 1.0 / (self.head_dim ** 0.5)
-            attn = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) * scale, dim=-1)
-            attn = torch.matmul(attn, v)
-
-        h_t = self.proj(attn.reshape(B * N * P, d)).reshape(B, N, P, d)
-
-        # ===== 空间分支 =====
-        q = self.q_proj(h)
-        # D @ Q: (N,N) @ (B,N,P,d) -> 需要 reshape
-        q_perm = q.permute(0, 3, 1, 2)  # (B, d, N, P)
-        # 使用固定的 D 矩阵
-        D = self.D.to(h.device)
-        q_spatial = torch.einsum('nm,bmdp->bndp', D, q_perm)  # (B, d, N, P)
-        q_spatial = q_spatial.permute(0, 2, 3, 1)  # (B, N, P, d)
-        h_s = self.update(q_spatial)
-
-        # ===== 门控融合 =====
-        gate = self.gate(torch.cat([h_t, h_s], dim=-1))
-        out = residual + gate * h_t + (1 - gate) * h_s
-
-        return out
-
-
-class STFormerBone(nn.Module):
-    """STFormerBone 主干网络（兼容 FormerBone 接口）"""
-    def __init__(self, configs):
-        super().__init__()
-        self.patch_len = configs.patch_len
-        self.stride = configs.stride
-        self.d_model = configs.d_model
-        self.n_vars = configs.enc_in
-        self.num_heads = configs.num_heads
-
-        # 计算 patch 数量
-        patch_num = int((configs.seq_len - self.patch_len) / self.stride + 1)
-        patch_num_forecast = int((configs.pred_len - self.patch_len) / self.stride + 1)
-        self.patch_num = patch_num
-        self.patch_num_forecast = patch_num_forecast
-
-        # 输入投影
-        self.W_input_projection = nn.Linear(self.patch_len, configs.d_model)
-
-        # 时间步嵌入（改为加法）
-        self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
-
-        # 输出投影
-        total_patches = patch_num + 1 + patch_num_forecast
-        self.W_outs = nn.Linear(total_patches * configs.d_model, configs.pred_len)
-
-        # ST-Layer
-        self.st_layers = nn.ModuleList([
-            STJointLayer(configs.d_model, configs.num_heads, configs.enc_in, configs)
-            for _ in range(getattr(configs, 'st_layers', 3))
-        ])
-
-        # D 矩阵（从 graph.py 加载）
-        if getattr(configs, 'graph_enabled', False):
-            D = build_d_matrix_from_adjacency(
-                configs.graph_adj_path,
-                configs.graph_num_nodes
-            )
-            # 给每个 STJointLayer 注册 D
-            for layer in self.st_layers:
-                layer.register_buffer('D', D)
-        else:
-            # 默认单位矩阵
-            for layer in self.st_layers:
-                layer.register_buffer('D', torch.eye(configs.enc_in))
-
-    def forward(self, x, timesteps, cond_ts, x_mark_enc=None, *configs, **kwargs):
-        """
-        兼容 FormerBone 接口
-        输入: x (B*N, T), timesteps (B*N,), cond_ts (B*N, L)
-        输出: z_out (B*N, pred_len)
-        """
-        # Rearrange: (B*N, T) -> (B, N, T)
-        b = x.shape[0] // self.n_vars
-        x = rearrange(x, '(b n) h -> b n h', n=self.n_vars)
-        cond_ts = rearrange(cond_ts, '(b n) h -> b n h', n=self.n_vars)
-        timesteps = rearrange(timesteps, '(b n) -> b n', n=self.n_vars).unsqueeze(-1).unsqueeze(-1)
-
-        # Patch 化
-        zcube0 = cond_ts.unfold(dimension=-1, size=self.patch_len, step=self.stride)
-        zcube1 = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
-        zcube = torch.cat([zcube0, zcube1], dim=-2)
-
-        # 投影
-        z_embed = self.W_input_projection(zcube)
-
-        # 时间步嵌入（加法而非拼接）
-        time_token = self.cls(timesteps.float())
-        z_embed = z_embed + time_token.unsqueeze(-2)  # 广播加法
-
-        # ST-Layer
-        for layer in self.st_layers:
-            z_embed = layer(z_embed)
-
-        # 输出
-        z_out = self.W_outs(z_embed.reshape(b, self.n_vars, -1))
-        return z_out.reshape(b * self.n_vars, -1)
-
-
-class PatchUVIT_STFormer(nn.Module):
-    """Wrapper 兼容 PatchUVIT 接口"""
-    def __init__(self, configs, **kwargs):
-        super().__init__()
-        self.model = STFormerBone(configs)
-        self.enc_in = configs.enc_in
-
-    def forward(self, x, timesteps, cond_ts, x_mark_enc=None, *configs, **kwargs):
-        return self.model(x, timesteps, cond_ts, x_mark_enc, *configs, **kwargs)
-```
+1. **每步可运行**：每个 Phase 完成后代码都能跑通
+2. **每步可对比**：有明确的基线对比指标
+3. **每步可回滚**：出问题时能回到上一个稳定版本
+4. **逐步启用**：功能从简到繁，不跳跃
 
 ---
 
-## 三、Phase 2: 修改 model.py
+## 二、Phase 0: 基线记录
 
-在 `model.py` 的 `__init__` 中添加切换开关：
+### 目标
+确认现有 FormerBone 正常工作，记录基线指标
 
-```python
-def __init__(self, configs):
-    super(Model, self).__init__()
-    # ... 其他初始化 ...
+### 操作
+1. 运行现有训练 10 epoch，记录 loss 曲线
+2. 运行测试，记录 MAE/MSE 指标
+3. **git commit 当前状态**：`git add . && git commit -m "baseline: FormerBone working"`
 
-    # 骨干网络选择
-    if getattr(configs, 'use_stformer', False):
-        from .stformer_bone import PatchUVIT_STFormer
-        self.nn = PatchUVIT_STFormer(configs)
-        print("Using STFormerBone")
-    else:
-        from .unet_bone import PatchUVIT
-        self.nn = PatchUVIT(configs)
-        print("Using PatchUVIT (FormerBone)")
+### 验收标准
+- [ ] 训练 10 epoch 无 NaN/Inf
+- [ ] 测试输出合理数值范围
+- [ ] 指标记录在笔记中（如 MAE ≈ 1.6）
 
-    # ... 其余保持不变 ...
-```
+### 失败处理
+若失败 → 检查数据加载、归一化代码，不进入下一阶段
 
 ---
 
-## 四、配置添加
+## 三、Phase 1: 接口对齐
 
-在 yaml 配置文件中添加：
+### 目标
+创建 `stformer_bone.py`，保持与 FormerBone **完全相同的输入输出接口**
+
+### 操作
+1. 创建 `models/fourier/stformer_bone.py`
+2. 实现 **最小版本**：
+   - 输入/输出层复制自 `unet_bone.py`
+   - 中间层用 `nn.Identity()` 占位（透传）
+   - 时间注入：加法（不同于拼接，后续再改）
+
+3. 修改 `model.py`：添加 `use_stformer` 开关
+   ```python
+   if getattr(configs, 'use_stformer', False):
+       from .stformer_bone import PatchUVIT_STFormer
+       self.nn = PatchUVIT_STFormer(configs)
+   else:
+       from .unet_bone import PatchUVIT
+       self.nn = PatchUVIT(configs)
+   ```
+
+4. 添加配置项（yaml）：
+   ```yaml
+   use_stformer: false  # 默认关闭
+   ```
+
+### 验收标准
+- [ ] `use_stformer: false` 时，结果与 Phase 0 **完全一致**（MSE 差异 < 0.001）
+- [ ] `use_stformer: true` 时，能跑通一个 batch
+- [ ] 输出维度正确：输入 `(B*N, 12)` → 输出 `(B*N, 12)`
+
+### 失败处理
+- 维度报错 → 检查 reshape/unfold 逻辑
+- 结果不一致 → 检查 `use_stformer: false` 分支是否正确
+
+---
+
+## 四、Phase 2: 时序分支验证
+
+### 目标
+实现时序分支（RotaryAttn），空间分支暂时跳过（D=I）
+
+### 操作
+1. 在 `STJointLayer` 中实现：
+   - Pre-LN: `nn.LayerNorm`
+   - 时序分支：`TemporalAttention`（无因果掩码）
+   - 空间分支：`h_s = 0`（跳过）
+   - 门控：`gate = 0.5`（固定）
+
+2. 配置开关：
+   ```yaml
+   use_stformer: true
+   st_layers: 3
+   ```
+
+3. 训练 10 epoch，与 Phase 0 基线对比
+
+### 验收标准
+- [ ] 训练收敛，loss 下降曲线正常
+- [ ] MAE 与基线差距 < 5%（说明时序分支正确）
+- [ ] 梯度 norm 在 0.1~10 范围（不爆炸/不消失）
+
+### 失败处理
+- 收敛慢 → 检查学习率
+- 梯度异常 → 检查 Pre-LN 实现
+
+---
+
+## 五、Phase 3: 空间分支验证
+
+### 目标
+加入真实 D 矩阵，验证空间分支有效
+
+### 操作
+1. 从 `utils/graph.py` 加载 D 矩阵
+2. 在 `STJointLayer` 中实现：
+   - 空间分支：`q_spatial = D @ q_proj(h)`
+   - `spatial_alpha` 初始为 0.1（弱权重）
+
+3. 消融实验：
+   - 实验 A：D=I（纯时序）
+   - 实验 B：D=真实（弱空间，α=0.1）
+   - 实验 C：D=真实（强空间，α=1.0）
+
+### 验收标准
+- [ ] 实验 C 优于实验 A（空间分支有效）
+- [ ] gate 值在 0.3~0.7 之间（不饱和）
+- [ ] 门控可视化：自由流区域 gate 高，拥堵区域 gate 低
+
+### 失败处理
+- 性能下降 → 减小 `spatial_alpha` 到 0.01
+- gate 饱和 → 检查 Sigmoid 初始化
+
+---
+
+## 六、Phase 4: 门控训练
+
+### 目标
+启用可学习门控，完成完整 STFormerBone
+
+### 操作
+1. 门控从固定 0.5 改为可训练
+2. 可调参数实验：
+   ```yaml
+   st_layers: [3, 5, 7]  # 测试不同深度
+   gate_dropout: [0.0, 0.1]  # 防止过拟合
+   ```
+
+3. A/B 测试：与 FormerBone 对比所有指标
+
+### 验收标准
+- [ ] MAE ≤ FormerBone（或差距 < 5%）
+- [ ] 训练时间增加 < 50%
+- [ ] 显存增加 < 30%
+
+### 失败处理
+- 性能不达标 → 回到 Phase 2 检查基础实现
+- 训练不稳定 → 增加 Dropout 或减小学习率
+
+---
+
+## 七、代码修改清单
+
+| 文件 | 修改内容 | 阶段 |
+|------|----------|------|
+| **新建** `stformer_bone.py` | STJointLayer, STFormerBone | P1 |
+| `model.py` | 添加 `use_stformer` 开关 | P1 |
+| `unet_bone.py` | 无需修改（保留备选） | - |
+
+---
+
+## 八、配置项汇总
 
 ```yaml
 # 模型选择
-use_stformer: false  # Phase 1 测试开关，false=原 FormerBone
+use_stformer: false  # P1: false, P2+: true
 
 # STFormerBone 专属
-st_layers: 3  # 可调，默认3层
+st_layers: 3          # 可调 3/5/7
+d_model: 128          # 与原配置一致
+num_heads: 8          # 与原配置一致
+dropout: 0.1          # 与原配置一致
+gate_dropout: 0.1     # P4 调参
+spatial_alpha_init: 0.1  # P3 初始值
 ```
 
 ---
 
-## 五、验证清单
+## 九、git 提交规范
 
-| 阶段 | 检查项 | 通过标准 |
-|------|--------|----------|
-| P1 | `use_stformer: false` 时与原代码结果一致 | MSE 差异 < 0.01 |
-| P1 | `use_stformer: true` 时输出维度正确 | `(B*N, pred_len)` |
-| P2 | 训练 10 epoch 不 NaN | 损失下降 |
-| P3 | 空间分支启用后 MAE 下降 | 对比 P2 提升 |
+| 阶段 | 提交信息 |
+|------|----------|
+| P0 | `git commit -m "baseline: FormerBone working"` |
+| P1 | `git commit -m "feat: add stformer_bone.py interface"` |
+| P2 | `git commit -m "feat: add temporal branch to STJointLayer"` |
+| P3 | `git commit -m "feat: add spatial branch to STJointLayer"` |
+| P4 | `git commit -m "feat: complete STFormerBone with trainable gate"` |
 
 ---
 
-## 六、git 提交建议
+## 十、总结：每步做什么、做到什么
 
-```bash
-# 提交信息
-git add fourier/stformer_bone.py fourier/model.py
-git commit -m "feat: add STFormerBone with use_stformer switch
-
-- Phase 1: Create stformer_bone.py with STJointLayer
-- Add model switch in model.py __init__
-- Compatible with FormerBone interface"
-```
+| 阶段 | 做什么 | 做到什么（验收） |
+|------|--------|------------------|
+| **P0** | 记录基线 | 训练正常、指标记录 |
+| **P1** | 创建空壳 | 接口对齐、开关可控 |
+| **P2** | 加时序分支 | 收敛、性能接近基线 |
+| **P3** | 加空间分支 | 空间有效、性能提升 |
+| **P4** | 完整训练 | 全面对比、指标达标 |
