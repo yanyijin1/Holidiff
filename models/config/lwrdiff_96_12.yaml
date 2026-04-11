@@ -1,16 +1,18 @@
-# LWRDiff Training Configuration - MSST Speed Dataset
+# LWRDiff Training Configuration - pred_len=12
+# Based on need/LWRdiff/script/train_msst_speed.yaml
 
 experiment:
-  name: lwrdiff_msst_speed
+  name: lwrdiff_train
   task_name: long_term_forecast
   model: LWRdiff
-  model_id: msst_speed_96_12
-  des: msst_speed_seed42
+  model_id: lwrdiff_96_12
+  des: lwrdiff_baseline
   itr: 1
+  seed: 42
 
 data:
   data: custom
-  root_path: ./data/
+  root_path: /root/yanyijin/STdiff/models/data/
   data_path: msst_speed.csv
   features: M
   target: s0
@@ -18,6 +20,11 @@ data:
   enc_in: 30
   dec_in: 30
   c_out: 30
+
+graph:
+  enabled: true
+  adj_path: /root/yanyijin/STdiff/models/data/adjacent_gantry.csv
+  num_nodes: 30
 
 window:
   seq_len: 96
@@ -31,14 +38,13 @@ model_args:
   stride: 3
   patch_len: 6
   dropout: 0.0
+  skip_dropout: 0.3
   d_ff: 512
-  d_layers: 1
 
 optimization:
-  seed: 42
   batch_size: 32
-  train_epochs: 30
-  patience: 8
+  train_epochs: 1
+  patience: 3
   learning_rate: 0.0001
   loss_type: MAE
 
@@ -53,11 +59,7 @@ sampling:
   sample_times: 20
   vs_times: 5
   use_mom: 1
-  mom_mode: mom
-  mom_tau: 5.0
-  mom_clusters: 2
   new_norm: 1
   rmom: 20
   n_b: 5
   coss: 0.008
-  debug: true

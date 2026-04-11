@@ -43,31 +43,6 @@ def build_d_matrix_from_adjacency(adj_path, num_nodes=30):
     return build_laplacian_from_adjacency(adj_path, num_nodes)
 
 
-def build_d_matrix_linear(num_nodes, device='cpu'):
-    """
-    线性拓扑的 D 矩阵（D = I - S^T）
-    
-    显式形式（N=4）：
-    D = [[1, -1,  0,  0],
-         [0,  1, -1,  0],
-         [0,  0,  1, -1],
-         [0,  0,  0,  1]]
-    
-    参数:
-        num_nodes: 节点数量
-        device: 设备
-    
-    返回:
-        D: torch.Tensor, shape (N, N)
-    """
-    # 构建下游移位矩阵 S^T
-    ST = torch.zeros(num_nodes, num_nodes, device=device)
-    for i in range(num_nodes - 1):
-        ST[i, i + 1] = 1.0  # 节点i指向i+1
-    
-    # D = I - S^T
-    D = torch.eye(num_nodes, device=device) - ST
-    return D
 
 
 def get_d_matrix(device='cuda'):

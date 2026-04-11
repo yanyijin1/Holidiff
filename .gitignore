@@ -1,32 +1,48 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
 dist/
 build/
-*.egg
+.eggs/
 
-# Logs and temporary files
-logs/
-*.log
-nohup.out
-*.tmp
+# Jupyter
+.ipynb_checkpoints/
 
-# Checkpoints and models
-checkpoints/
-*.pth
-*.pt
-
-# Data
-data/
-*.csv
-*.npy
-*.pkl
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # OS
 .DS_Store
-*.swp
+Thumbs.db
 
-# IDE
-.vscode/
-.idea/
+# Logs
+*.log
+logs/
+
+# Data outputs
+results/
+test_results/
+checkpoints/
+*.npy
+*.pth
+*.pdf
+*.csv
+*.png
+*.jpg
+*.gif
+
+# Data
+*.csv
+
+# Env
+.env
+.env.local
+venv/
+env/

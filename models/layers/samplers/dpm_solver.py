@@ -292,10 +292,12 @@ def model_wrapper(
         if t_continuous.reshape((-1,)).shape[0] == 1:
             t_continuous = t_continuous.expand((x.shape[0]))
         t_input = get_model_input_time(t_continuous)
+        # print(f'[NOISE_PRED_FN] x.shape={x.shape}, t_input={t_input[0]:.2f}, cond is None: {cond is None}')
         if cond is None:
             output = model(x, t_input, **model_kwargs)
         else:
             output = model(x, t_input, cond, x_mark_enc,**model_kwargs)
+        # print(f'[NOISE_PRED_FN] model output shape: {output.shape}')
         if model_type == "noise":
             return output
         elif model_type == "x_start":
@@ -337,6 +339,7 @@ def model_wrapper(
             noise = noise_pred_fn(x, t_continuous)
             return noise - guidance_scale * expand_dims(sigma_t, dims=cond_grad.dim()) * cond_grad
         elif guidance_type == "classifier-free":
+            # print(f'[MODEL_FN] classifier-free guidance: scale={guidance_scale}, unconditional_condition is None: {unconditional_condition is None}')
             if guidance_scale == 1. or unconditional_condition is None:
                 return noise_pred_fn(x, t_continuous, cond=condition,x_mark_enc=x_mark_enc)
             else:

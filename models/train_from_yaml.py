@@ -76,6 +76,12 @@ def yaml_to_args(config):
     args.skip_dropout = model_cfg.get('skip_dropout', 0.1)
     args.use_tst_layer = model_cfg.get('use_tst_layer', False)
 
+    # Graph - 空间图结构配置
+    graph_cfg = cfg.get('graph', {})
+    args.graph_enabled = graph_cfg.get('enabled', False)
+    args.graph_adj_path = graph_cfg.get('adj_path', None)
+    args.graph_num_nodes = graph_cfg.get('num_nodes', None)
+
     # Optimization
     opt_cfg = cfg.get('optimization', config.get('optimization', {}))
     args.seed = opt_cfg.get('seed', 2021)

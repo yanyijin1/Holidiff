@@ -28,9 +28,11 @@ class RevIN(nn.Module):
         return x
 
     def _init_params(self):
-        # initialize RevIN params: (C,)
-        self.affine_weight = nn.Parameter(torch.ones(self.num_features))
-        self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
+        # 确保参数在正确的设备上
+        device = next(self.parameters(), torch.tensor(0)).device
+        if not hasattr(self, 'affine_weight') or self.affine_weight.device != device:
+            self.affine_weight = nn.Parameter(torch.ones(self.num_features, device=device))
+            self.affine_bias = nn.Parameter(torch.zeros(self.num_features, device=device))
 
     def _get_statistics(self, x):
         dim2reduce = tuple(range(1, x.ndim-1))
@@ -52,12 +54,18 @@ class RevIN(nn.Module):
         return x
 
     def _denormalize(self, x):
+        # 确保所有参数在同一设备上
         if self.affine:
-            x = x - self.affine_bias
-            x = x / (self.affine_weight + self.eps*self.eps)
-        x = x * self.stdev
+            weight = self.affine_weight.to(x.device)
+            bias = self.affine_bias.to(x.device)
+            x = x - bias
+            x = x / (weight + self.eps*self.eps)
+        stdev = self.stdev.to(x.device)
+        mean = self.mean.to(x.device)
+        x = x * stdev
         if self.subtract_last:
-            x = x + self.last
+            last = self.last.to(x.device)
+            x = x + last
         else:
-            x = x + self.mean
+            x = x + mean
         return x

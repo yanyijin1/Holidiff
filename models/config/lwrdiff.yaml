@@ -11,14 +11,19 @@ experiment:
 
 data:
   data: ETTh1
-  root_path: ./data/ETT/
-  data_path: ETTh1.csv
+  root_path: /root/yanyijin/STdiff/models/data/
+  data_path: msst_speed.csv
   features: M
   target: OT
   freq: h
-  enc_in: 7
-  dec_in: 7
-  c_out: 7
+  enc_in: 30
+  dec_in: 30
+  c_out: 30
+
+graph:
+  enabled: true
+  adj_path: /root/yanyijin/STdiff/models/data/adjacent_gantry.csv
+  num_nodes: 30
 
 window:
   seq_len: 96
@@ -38,7 +43,7 @@ model_args:
 optimization:
   seed: 2021
   batch_size: 32
-  train_epochs: 10
+  train_epochs: 30
   patience: 3
   learning_rate: 0.0001
   loss_type: MSE
