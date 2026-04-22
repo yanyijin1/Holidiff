@@ -75,8 +75,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _build_model(self):
         # 根据 use_stformer 配置选择不同的模型
         use_stformer = getattr(self.args, 'use_stformer', False)
+        use_lwrgat = getattr(self.args, 'use_lwrgat', False)
         
-        if use_stformer:
+        if use_lwrgat:
+            # Phase 1: STLWRGAT 模型
+            from LWRGAT.Model import Model as LWRGATModel
+            model = LWRGATModel(self.args).float()
+        elif use_stformer:
             from stformer_bone.Model import Model as STFormerModel
             model = STFormerModel(self.args).float()
         else:
@@ -109,9 +114,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         t0 = time.time()
         debug_count = 0
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
+            for i, batch in enumerate(vali_loader):
                 if i >= 2:
                     break
+                # 支持双流数据（有6个值）和原始数据（有4个值）
+                if len(batch) == 6:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark, batch_flow_x, batch_flow_y = batch
+                else:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+                    batch_flow_x, batch_flow_y = None, None
+                
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
 
@@ -190,9 +202,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             if self.args.is_diff:
                 adjust_learning_rate_new(model_optim, epoch + 1, self.args)
 
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+            for i, batch in enumerate(train_loader):
                 iter_count += 1
                 model_optim.zero_grad()
+                
+                # 支持双流数据（有6个值）和原始数据（有4个值）
+                if len(batch) == 6:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark, batch_flow_x, batch_flow_y = batch
+                else:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+                    batch_flow_x, batch_flow_y = None, None
                 
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
@@ -258,11 +277,14 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return self.model
 
     def test(self, setting, test=0):
+        print("[TEST] Step 1: Getting test data...", flush=True)
         test_data, test_loader = self._get_data(flag='test')
+        print(f"[TEST] Step 1: Done. test_data={len(test_data)}, batches={len(test_loader)}", flush=True)
         
         if test:
-            print('loading model')
+            print('[TEST] Step 2: Loading model checkpoint...', flush=True)
             self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
+            print('[TEST] Step 2: Done.', flush=True)
             
         predms = []
         preds = []
@@ -272,8 +294,20 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             os.makedirs(folder_path)
 
         self.model.eval()
+        print(f'[TEST] Step 3: Starting test inference loop... (total batches: {len(test_loader)})', flush=True)
+        
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+            for i, batch in enumerate(test_loader):
+                print(f'[TEST] Batch {i}: Getting batch...', flush=True)
+                
+                # 支持双流数据（有6个值）和原始数据（有4个值）
+                if len(batch) == 6:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark, batch_flow_x, batch_flow_y = batch
+                else:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark = batch[:4]
+                    batch_flow_x, batch_flow_y = None, None
+                    
+                print(f'[TEST] Batch {i}: Moving to device...', flush=True)
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -282,6 +316,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 
+                print(f'[TEST] Batch {i}: Calling model forward...', flush=True)
                 if self.args.output_attention:
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                 else:
@@ -290,7 +325,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                                                        sample_times=self.args.sample_times)
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-
+                
+                print(f'[TEST] Batch {i}: Model forward done, processing outputs...', flush=True)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, :]
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -308,6 +344,11 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     predms.append(predm)
                 preds.append(pred)
                 trues.append(true)
+                
+                print(f'[TEST] Batch {i}: Done. Accumulated: {len(preds)} batches', flush=True)
+                
+                if (i + 1) % 5 == 0:
+                    print(f'  test batch {i+1}/{len(test_loader)}', flush=True)
 
         predms = np.array(predms) if predms else None
         preds = np.array(preds)
@@ -318,6 +359,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print('mse:{}, mae:{}, rmse:{}'.format(mse, mae, rmse))
+        print('Test inference completed!')
 
         folder_path = './results/' + setting + '/'
         if not os.path.exists(folder_path):

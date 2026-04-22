@@ -188,7 +188,8 @@ class Dataset_ETT_minute(Dataset):
 class Dataset_Custom(Dataset):
     def __init__(self, args, root_path, flag='train', size=None,
                  features='S', data_path='ETTh1.csv',
-                 target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
+                 target='OT', scale=True, timeenc=0, freq='h', seasonal_patterns=None,
+                 flow_path=None):
         self.args = args
         if size == None:
             self.seq_len = 24 * 4 * 4
@@ -210,6 +211,7 @@ class Dataset_Custom(Dataset):
 
         self.root_path = root_path
         self.data_path = data_path
+        self.flow_path = flow_path  # 流量数据路径
         self.__read_data__()
 
     def __read_data__(self):
@@ -257,6 +259,27 @@ class Dataset_Custom(Dataset):
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
 
+        # 加载流量数据（如果有）
+        if self.flow_path:
+            df_flow = pd.read_csv(os.path.join(self.root_path, self.flow_path))
+            cols_flow = list(df_flow.columns)
+            cols_flow.remove('date')
+            df_flow = df_flow[['date'] + cols_flow]
+            flow_data = df_flow[cols_flow].values
+            
+            if self.scale:
+                # 流量使用相同的归一化
+                train_flow = flow_data[border1s[0]:border2s[0]]
+                self.flow_mean = train_flow.mean(axis=0)
+                self.flow_std = train_flow.std(axis=0) + 1e-6
+                flow_data = (flow_data - self.flow_mean) / self.flow_std
+            
+            self.flow_x = flow_data[border1:border2]
+            self.flow_y = flow_data[border1:border2]
+        else:
+            self.flow_x = None
+            self.flow_y = None
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -268,6 +291,12 @@ class Dataset_Custom(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
+        # 返回流量数据（如果有）
+        if self.flow_x is not None:
+            seq_flow_x = self.flow_x[s_begin:s_end]
+            seq_flow_y = self.flow_y[r_begin:r_end]
+            return seq_x, seq_y, seq_x_mark, seq_y_mark, seq_flow_x, seq_flow_y
+        
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
@@ -307,6 +336,7 @@ def data_provider(args, flag):
         timeenc=timeenc,
         freq=freq,
         seasonal_patterns=getattr(args, 'seasonal_patterns', None),
+        flow_path=getattr(args, 'flow_path', None),  # 传递流量数据路径
     )
     print(flag, len(data_set))
     data_loader = DataLoader(

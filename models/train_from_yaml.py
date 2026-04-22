@@ -47,6 +47,7 @@ def yaml_to_args(config):
     args.data = data_cfg.get('data', 'custom')
     args.root_path = data_cfg.get('root_path', './data/')
     args.data_path = data_cfg.get('data_path', 'data.csv')
+    args.flow_path = data_cfg.get('flow_path', None)  # 流量数据路径（LWRGAT 双流输入）
     args.features = data_cfg.get('features', 'M')
     args.target = data_cfg.get('target', 'OT')
     args.freq = data_cfg.get('freq', 'h')
@@ -90,7 +91,7 @@ def yaml_to_args(config):
     args.patience = opt_cfg.get('patience', 3)
     args.learning_rate = opt_cfg.get('learning_rate', 0.0001)
     args.loss_type = opt_cfg.get('loss_type', 'MSE')
-    args.num_workers = opt_cfg.get('num_workers', 10)
+    args.num_workers = 0  # 避免多进程导致的问题
     args.lradj = opt_cfg.get('lradj', 'type1')
     args.use_amp = opt_cfg.get('use_amp', False)
 
@@ -147,6 +148,7 @@ def yaml_to_args(config):
     # 模型切换配置
     switch_cfg = cfg.get('model_switch', config.get('model_switch', {}))
     args.use_stformer = switch_cfg.get('use_stformer', False)
+    args.use_lwrgat = switch_cfg.get('use_lwrgat', False)
     args.st_layers = switch_cfg.get('st_layers', 3)
     
     return args

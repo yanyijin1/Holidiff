@@ -74,7 +74,7 @@ class DPMSolverSampler(object):
         ns = NoiseScheduleVP('discrete', alphas_cumprod=self.alphas_cumprod)
         model_fn = model_wrapper(
                 self.diff_steps,
-                lambda x, t, c, m: self.model.forward(x, t, c, m),
+                lambda x, t, c, m: self.model.forward_for_diffusion(x, t, c, m),
                 ns,
                 model_type="x_start",
                 guidance_type="classifier-free",
