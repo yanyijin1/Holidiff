@@ -1,287 +1,361 @@
-# STDiff 当前架构文档
+# STDiff 当前架构流程图 (v3 - 时空联合门控)
 
-> 基于 SimDiff 风格的时空扩散预测模型
+> 基于完全时空耦合的时空扩散预测模型
 
 ---
 
-## 一、训练阶段数据流 (forward_train)
+## 一、整体架构
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│  训练阶段前向流程                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          STDiff 完整训练流程                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+输入层                          主干网络                           输出层
+┌─────────┐                  ┌─────────────────┐                  ┌─────────┐
+│ batch_x │                  │                 │                  │         │
+│ (B,96,N)│ ────> ───> ───> │  PatchUVIT_     │ ───> ───> ───>  │model_out│
+│         │                  │  STFormerBone   │                  │(B,12,N) │
+│ batch_y │                  │                 │                  │         │
+│ (B,108,N)                  │ (STJointLayer×3)│                  │         │
+└─────────┘                  └─────────────────┘                  └─────────┘
+                                    ▲
+                                    │ Gate 控制
+                              ┌─────┴─────┐
+                              │ 时空联合  │
+                              │   门控    │
+                              └───────────┘
+```
+
+---
+
+## 二、训练阶段数据流 (forward_train)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        训练阶段前向流程 (NI 归一化)                            │
+└─────────────────────────────────────────────────────────────────────────────┘
 
 【输入】
-  batch_x: (B, L=96, N=30)         # 历史序列
-  batch_y: (B, L+48+12, N=30)      # 完整标签
+  batch_x: (B, L=96, N)              # 历史序列
+  batch_y: (B, L+pred_len, N)        # 完整标签
 
-▼ permute: (B,L,N) -> (B,N,L)
-  x: (B, N, pred_len=12)           # 目标部分
-  cond_ts: (B, N, seq_len=96)      # 条件部分
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ 归一化 (全局标准化)
-  mean = cond_ts.mean(dim=(1,2))
-  std = cond_ts.std(dim=(1,2))
-  x_norm = (x - mean) / std
-  cond_norm = (cond_ts - mean) / std
+Step 1: 数据分割
+  x_target = batch_y[:, -pred_len:, :]  # (B, 12, N) 目标部分
+  cond_ts = batch_x                      # (B, 96, N) 条件部分
 
-▼ 扩散加噪
-  t ~ Uniform(0, T)
-  x_k = sqrt(alpha_t) * x_norm + sqrt(1-alpha_t) * noise
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ FormerBone 前向（保持 B,N 维度）
+Step 2: NI 归一化 (Normalization Independence)
 
-  输入: x_k (B, N, 12), cond_norm (B, N, 96), t (B, N)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ 条件分支 (使用 RevIN)                                                │
+  │   cond_ts_orig = cond_ts.permute(0,2,1)     # (B, N, 96)           │
+  │   cond_norm = revin_layer(cond_ts_orig,'norm')  # RevIN 归一化      │
+  │   cond_flat = cond_norm.reshape(B*N, 96)     # (B*N, 96)           │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  [1] Patch化 (unfold)
-      cond_ts.unfold(dim=-1, patch_len, stride) -> (B, N, P_cond, 6)
-      x_k.unfold(dim=-1, patch_len, stride)     -> (B, N, P_x, 6)
-      zcube = concat(cond_patches, x_patches)   -> (B, N, P+P', 6)
-      z_embed = W_input_projection(zcube)        -> (B, N, P+P', 128)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ 目标分支 (使用自身统计量，std=1)                                      │
+  │   x = x_target.permute(0,2,1)                # (B, N, 12)          │
+  │   mean_ = torch.mean(x, dim=1).unsqueeze(1)  # 自身 mean            │
+  │   std_ = torch.ones_like(...)                # std=1                │
+  │   x_norm = (x - mean_) / (std_ + eps)                              │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  [2] 时间步 Token
-      t: (B, N) -> time_token: (B, N, 1, 128)
-      z_embed = concat(time_token, z_embed)      -> (B, N, P+P'+1, 128)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  [3] T-Down (编码阶段 x e_layers)
-      Attention: (B, N, P, d) -> (B, N, P, d)
-      每次保存 h 到 skip list
+Step 3: 扩散加噪
+  t = torch.randint(0, T, [B*N//2]).to(device)  # 时间步
+  t = torch.cat([t, T-1-t], dim=0)                 # 对称采样
+  noise = torch.randn_like(x_norm)
+  x_k = noise_ts(x_start=x_norm, t=t, noise=noise)  # 加噪
 
-  [4] T-Mid (最深层)
-      Attention: (B, N, P, d) -> (B, N, P, d)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  [5] T-Up (解码阶段 x e_layers)
-      逐层: MLP(concat(skip.pop(), h)) + Attention
+Step 4: PatchUVIT_STFormer 主干网络
 
-  [6] S-LWR (空间传播) <- 核心
-      输入: h (B, N, T, d)  T=P+P'+1
+  输入: x_k (B*N, 12), cond_flat (B*N, 96), t (B*N,)
 
-      # 空间维度从 (B,N,T,d) 转为 (B,d,N,T) 做矩阵乘法
-      q = Q_proj(h.permute(0,3,1,2))           -> (B, d, N, T)
-      q = q.permute(0,2,3,1)                   -> (B, N, T, d)
-      q_spatial = D @ q (D: N x N)             -> (B, N, T, d)
-      delta_h = Update(q_spatial)
-      h = h + sigmoid(gate) * delta_h
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ [4.1] Rearrange: (B*N, T) -> (B, N, T)                             │
+  │   x = rearrange(x_k, '(b n) t -> b n t', n=N)  # (B, N, 12)       │
+  │   cond = rearrange(cond_flat, ...)             # (B, N, 96)        │
+  │   t = timesteps.reshape(B, N, 1)               # (B, N, 1)        │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  [7] T-Fusion (时间融合)
-      Attention: (B, N, T, d) -> (B, N, T, d)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ [4.2] Patch Embedding (unfold + Linear)                            │
+  │                                                                     │
+  │   cond_patches = cond.unfold(-1, 6, stride)  # (B, N, P_cond, 6)  │
+  │   x_patches = x.unfold(-1, 6, stride)         # (B, N, P_x, 6)     │
+  │                                                                     │
+  │   patches = concat([cond_patches, x_patches]) # (B, N, P, 6)       │
+  │   h = input_proj(patches)                     # (B, N, P, 128)    │
+  └─────────────────────────────────────────────────────────────────────┘
 
-  输出: z (B, N, pred_len)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ [4.3] Time Embedding (加法注入)                                      │
+  │   t_flat = t.reshape(B*N)                    # (B*N,)              │
+  │   time_embed = time_embed(t_flat)            # (B*N, 128)         │
+  │   time_embed = time_embed.reshape(B,N,1,128)  # (B,N,1,128)        │
+  │   h = h + time_embed                          # 广播加法            │
+  └─────────────────────────────────────────────────────────────────────┘
 
-▼ 输出映射
-  z_flat = W_outs(z)                           -> (B*N, pred_len)
-  z_denorm = z_flat.reshape(B,N,12) * std + mean
-  model_out = z_denorm.permute(0,2,1)          -> (B, 12, N)
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ [4.4] ST-Joint Layers × N (核心: 完全时空耦合)                        │
+  │                                                                     │
+  │   for st_layer in st_layers:                                       │
+  │       h = st_layer(h)  # (B, N, P, 128) -> (B, N, P, 128)        │
+  └─────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ [4.5] Output Projection                                            │
+  │   h_forecast = h[:, :, P_cond:, :]  # 只取预测部分 (B,N,P_x,128)    │
+  │   h_flat = h_forecast.reshape(B*N, -1)                             │
+  │   z_out = output_proj(h_flat)        # (B*N, 12)                   │
+  └─────────────────────────────────────────────────────────────────────┘
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step 5: 反归一化
+  model_out = z_out.reshape(B, N, pred_len)
+  model_out = model_out.permute(0, 2, 1)      # (B, 12, N)
+  model_out = revin_layer(model_out, 'denorm') # RevIN 反归一化
 
   输出: model_out (B, pred_len, N)
 ```
 
 ---
 
-## 二、推理阶段数据流 (forward_val_test)
+## 三、ST-Joint Layer (时空联合门控层)
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│  推理阶段采样流程                                                        │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          ST-Joint Layer 内部结构                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+输入: h (B, N, P, d) ─────────────────────────────────────────────┐
+         │                                                         │
+         ▼                                                         │
+  ┌─────────────────────────────────────────────────────────────┐  │
+  │                        Gate 生成                             │  │
+  │                                                             │  │
+  │   ┌──────────────┐    ┌──────────────┐                     │  │
+  │   │ Temporal     │    │ Spatial      │                     │  │
+  │   │ Branch       │    │ Branch       │                     │  │
+  │   │    ↓         │    │    ↓         │                     │  │
+  │   │ h_t (B,N,P,d)│    │ h_s (B,N,P,d)│                     │  │
+  │   └──────┬───────┘    └──────┬───────┘                     │  │
+  │          │                    │                             │  │
+  │          └────────┬───────────┘                             │  │
+  │                   ▼                                          │  │
+  │          ┌────────────────┐                                   │  │
+  │          │ Concat         │                                   │  │
+  │          │ [h_t, h_s]     │ -> (B, N, P, 2d)                 │  │
+  │          └───────┬────────┘                                   │  │
+  │                  ▼                                            │  │
+  │          ┌────────────────┐                                   │  │
+  │          │ Gate Projection│ σ(W_g · Concat)                  │  │
+  │          │ 2d -> d        │ -> (B, N, P, d)                   │  │
+  │          └────────────────┘                                   │  │
+  └─────────────────────────────────────────────────────────────┘  │
+         │                                                         │
+         ▼                                                         │
+  ┌─────────────────────────────────────────────────────────────┐  │
+  │                    特征融合                                   │  │
+  │                                                             │  │
+  │   H_new = H + gate ⊗ H_T + (1 - gate) ⊗ H_S               │  │
+  │                                                             │  │
+  │   - gate → 1: 侧重时序特征                                   │  │
+  │   - gate → 0: 侧重空间特征                                   │  │
+  │   - gate ∈ (0,1): 软选择，自动平衡                           │  │
+  └─────────────────────────────────────────────────────────────┘  │
+         │                                                         │
+         ▼                                                         │
+输出: out (B, N, P, d)
+```
+
+### 3.1 Temporal Branch (时序分支)
+
+```
+输入: h (B, N, P, d)
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Pre-LayerNorm                                              │
+  │    h_norm = h                                               │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  QKV 投影 + Rotary Embedding                                │
+  │                                                             │
+  │    qkv = W_qkv(h_norm)              # (B,N,P, 3d)          │
+  │    q,k,v = split(qkv, 3, dim=-1)                           │
+  │    q = rotary.rotate(q)            # 旋转位置编码            │
+  │    k = rotary.rotate(k)                                    │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  全注意力 (无因果掩码 - 扩散特性)                              │
+  │                                                             │
+  │    attn = softmax(q @ k^T / √d)                             │
+  │    out = attn @ v                                          │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  残差 + FFN                                                  │
+  │                                                             │
+  │    out = h + Dropout(W_o(out))                              │
+  │    out = out + FFN(out)                                     │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+输出: h_t (B, N, P, d)
+```
+
+### 3.2 Spatial Branch (空间分支)
+
+```
+输入: h (B, N, P, d)
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  Q 投影                                                     │
+  │    q = W_q_proj(h)                # (B, N, P, d)           │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  D @ Q 空间传播 (LWR 物理先验)                                │
+  │                                                             │
+  │    D = I - S^T  (拓扑矩阵)                                   │
+  │    q_spatial = D @ q  (沿 N 维度传播)                        │
+  │                                                             │
+  │    einsum: 'nm,bnpd->bmpd'                                  │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  更新投影                                                   │
+  │    delta_h = Update(q_spatial)                             │
+  │    alpha = sigmoid(spatial_alpha)  # 可学习强度            │
+  │    out = h + alpha * delta_h                              │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+输出: h_s (B, N, P, d)
+```
+
+---
+
+## 四、推理阶段数据流 (forward_val_test)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        推理阶段采样流程 (DPM-Solver)                          │
+└─────────────────────────────────────────────────────────────────────────────┘
 
 【输入】
-  x_enc: (B, L, N)                   # 测试集历史数据
+  x_enc: (B, L, N)              # 测试集历史数据
+  sample_times: M               # 采样次数
 
-▼ 条件编码
-  x_past = x_enc.permute(0,2,1)     -> (B, N, L)
-  x_past = RevIN_norm(x_past)         或标准化
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-▼ 多次采样 (for i in range(sample_times))
+Step 1: 条件编码
+  x_past = x_enc.permute(0, 2, 1)           # (B, N, L)
+  x_past_normed = revin_layer(x_past, 'norm')  # RevIN 归一化
+  x_past_flat = x_past_normed.reshape(B*N, L)  # (B*N, L)
 
-  [1] start_code = randn(B*N, pred_len)   # 随机初始噪声
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  [2] DPM-Solver 采样 (S步)
-      for s in reversed(range(S)):
-          x_{t-1} = sampler(x_t, t, cond)
-          调用 FormerBone(x_t, t, cond)
+Step 2: 多步采样 (for i in range(sample_times))
 
-  [3] diff_samples: (B, N, pred_len)
-      反归一化
+  ┌─────────────────────────────────────────────────────────────┐
+  │  [2.1] 初始化随机噪声                                       │
+  │       start_code = randn(B*N, pred_len)                    │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  [2.2] DPM-Solver 采样 (S steps)                            │
+  │                                                             │
+  │       for s in reversed(range(S)):                         │
+  │           x_{t-1} = sampler(x_t, t, cond, model)            │
+  │           # 调用 STFormerBone 前向                           │
+  └─────────────────────────────────────────────────────────────┘
+         │
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  [2.3] 输出反归一化                                          │
+  │       diff_sample = diff_sample.permute(0,2,1)             │
+  │       diff_sample = revin_layer(diff_sample, 'denorm')     │
+  │       all_outs.append(diff_sample)                         │
+  └─────────────────────────────────────────────────────────────┘
 
-  收集 all_outs: (M, B, N, pred_len)
+  all_outs: (M, B, N, pred_len)
 
-▼ 聚合 (DiffusionAggregator)
-  if use_mom:
-      result = rob_median_of_means(all_outs)   # 鲁棒MoM
-  else:
-      result = mean(all_outs)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Step 3: 聚合 (DiffusionAggregator)
+  ┌─────────────────────────────────────────────────────────────┐
+  │  if use_mom:                                                │
+  │      result = robust_median_of_means(all_outs)              │
+  │  else:                                                      │
+  │      result = mean(all_outs)                                │
+  └─────────────────────────────────────────────────────────────┘
 
   输出: (B, pred_len, N)
 ```
 
 ---
 
-## 三、FormerBone 架构
-
-```
-FormerBone: T-Down -> T-Mid -> T-Up -> S-LWR -> T-Fusion
-
-输入: x (B,N,T), cond (B,N,L), t (B,N)
-
-  [1] Patch化
-      zcube = concat(unfold(cond), unfold(x))  -> (B,N,P+P',6)
-      z = W_proj(zcube)                         -> (B,N,P+P',d)
-
-  [2] 时间步
-      time_token = cls(t)                       -> (B,N,1,d)
-      z = concat(time_token, z)                 -> (B,N,P+P'+1,d)
-
-  [3] T-Down (e_layers 次)
-      z = Attention(z)  # 自注意 + RotaryEmbedding
-      z = Dropout(z)
-      skip.append(z)
-
-  [4] T-Mid
-      z = Attention(z)
-      z = Dropout(z)
-
-  [5] T-Up (e_layers 次)
-      z = MLP(concat(skip.pop(), z))
-      z = Attention(z)
-      z = Dropout(z)
-
-  [6] S-LWR (空间传播)
-      # 空间矩阵乘法 D @ Q
-      q = Q_proj(z)
-      q_spatial = D @ q  # D 是拉普拉斯矩阵
-      z = z + gate * Update(q_spatial)
-
-  [7] T-Fusion
-      z = Attention(z)
-
-  [8] 输出
-      W_outs(z)                                  -> (B,N,pred_len)
-```
-
----
-
-## 四、S-LWR 空间传播算子
-
-```
-SpatialLWROperator:
-
-输入: h (B, N, T, d)
-
-  D 矩阵:  (N x N)
-    - 图结构启用: 从邻接矩阵构建 D = I - S^T
-    - 图结构禁用: D = I (单位矩阵)
-
-  q_tilde = Q_proj(h)                 -> (B,N,T,d)
-  q_spatial = D @ q_tilde              -> (B,N,T,d)  # 节点间传播
-  delta_h = Update(q_spatial)         -> (B,N,T,d)
-  h_new = h + sigmoid(gate) * delta_h  -> (B,N,T,d)
-```
-
----
-
-## 五、Attention 模块
-
-```
-Attenion (SimDiff 风格带 RotaryEmbedding):
-
-输入: src (B, nvars, H, C)
-  nvars = N (节点数)
-  H = P+P'+1 (patch数量+token)
-  C = d_model
-
-  QKV = Linear(src)                  -> (B,nvars,H,3,d_model)
-  q,k,v = QKV.split(3, dim=-1)
-
-  q = rotary_emb.rotate(q)            # 旋转位置编码
-  k = rotary_emb.rotate(k)
-
-  attn = Attention(q,k,v)             -> (B,nvars,H,d_model)
-  output = FFN(attn) + src
-```
-
----
-
-## 六、DPM-Solver 采样
-
-```
-DPMSolverSampler.sample:
-
-输入: x_T (B*N, pred_len), conditioning (B*N, seq_len), S (步数)
-
-  for s in reversed(range(S)):
-      t = 当前时间步
-      x_t = 上一步结果
-
-      noise_pred = model.nn(x_t, t, conditioning)
-      x_{t-1} = 去噪一步(noise_pred, t)
-
-  输出: x_0 (B*N, pred_len)
-```
-
----
-
-## 七、MoM 聚合
-
-```
-DiffusionAggregator.aggregate:
-
-输入: all_outs (M, B, N, pred_len)
-
-  if use_mom:
-      for _ in range(rmom_n):
-          shuff = randperm(M)
-          shuffled = all_outs[shuff]
-          result = median_of_means(shuffled)
-          results.append(result)
-      return mean(results)
-
-  else:
-      return mean(all_outs)
-
-median_of_means:
-  分成 n_blocks 组
-  每组求 mean
-  取所有 mean 的 median
-```
-
----
-
-## 八、数据维度总结
+## 五、数据维度总结
 
 | 阶段 | 变量 | 维度 |
 |------|------|------|
-| 输入 | batch_x | (B, 96, 30) |
-| 内部 | x (目标) | (B, 30, 12) |
-| 内部 | cond_ts | (B, 30, 96) |
-| FormerBone | h | (B, 30, P+P'+1, 128) |
-| S-LWR | h | (B, 30, P+P'+1, 128) |
-| 输出 | z | (B, 30, 12) |
-| 最终 | output | (B, 12, 30) |
-| 采样 | all_outs | (M, B, 12, 30) |
+| 输入 | batch_x | (B, 96, N) |
+| 输入 | batch_y | (B, 108, N) |
+| NI 归一化 | cond_norm | (B, N, 96) |
+| NI 归一化 | x_norm | (B, N, 12) |
+| 加噪 | x_k | (B, N, 12) |
+| Patch化 | patches | (B, N, P, 6) |
+| 投影 | h | (B, N, P, 128) |
+| ST-Joint | h | (B, N, P, 128) |
+| 输出投影 | z_out | (B, N, 12) |
+| 最终输出 | model_out | (B, 12, N) |
+| 采样聚合 | all_outs | (M, B, N, 12) |
 
 ---
 
-## 九、模块依赖
+## 六、模块依赖
 
 ```
-fourier/
-├── model.py          # Model (主入口)
-│   ├── RevIN
-│   ├── PatchUVIT
-│   ├── DPMSolverSampler
-│   └── DiffusionAggregator
+models/
+├── stformer_bone/
+│   ├── Model.py           # 主入口 (训练/推理模式切换)
+│   ├── FormerBone.py     # STFormerBone 核心
+│   ├── gate.py           # STJointLayer (时空联合门控)
+│   ├── temporal.py       # TemporalAttention (时序分支)
+│   └── spatial.py        # SpatialPropagation (空间分支)
 │
-├── unet_bone.py      # FormerBone
-│   ├── Attenion (时间注意力)
-│   ├── SpatialLWROperator (空间传播)
-│   └── PatchUVIT
+├── layers/
+│   ├── RevIN.py          # 归一化/反归一化
+│   ├── rotaryembedding.py
+│   └── samplers/
+│       └── dpm_sampler.py
 │
-└── diffusion.py      # 调度
-    └── DiffusionAggregator
-
-layers/
-├── RevIN.py
-├── rotaryembedding.py
-└── samplers/dpm_sampler.py
+└── diffusion.py          # 扩散调度 (cosine_beta_schedule, DiffusionAggregator)
 ```
+
+---
+
+## 七、核心创新点
+
+1. **完全时空耦合**：通过 Gate 机制同时考虑时序和空间特征
+2. **向量级门控**：每个维度独立决定侧重时序还是空间
+3. **NI 归一化**：条件序列和目标序列独立归一化
+4. **LWR 物理先验**：空间分支使用 D @ Q 拓扑传播

@@ -135,7 +135,8 @@ class STFormerBone(nn.Module):
         
         return pcgk_cache
     
-    def forward(self, x, timesteps, cond_ts, x_mark_enc=None, pcgk_cache=None, **kwargs):
+    def forward(self, x, timesteps, cond_ts, x_mark_enc=None, pcgk_cache=None,
+                q_obs=None, v_obs=None, **kwargs):
         """
         Forward - Phase 1
         
@@ -144,6 +145,8 @@ class STFormerBone(nn.Module):
             timesteps: (B*N,) 时间步
             cond_ts: (B*N, seq_len) 条件序列
             pcgk_cache: list of [(A_k, regime), ...] 每层一个, None 则重新计算
+            q_obs: (B*N, seq_len) 流量观测，用于 PCGK 相态检测
+            v_obs: (B*N, seq_len) 速度观测，用于 PCGK 相态检测
         """
         # ========== Step 1: Rearrange ==========
         B_N, T = x.shape
@@ -169,10 +172,19 @@ class STFormerBone(nn.Module):
         time_embed = time_embed.reshape(B, N, 1, self.d_model).to(target_device)
         h = h + time_embed
         
-        # 从条件历史提取 q_obs 和 v_obs（用于 PCGK 缓存）
-        # cond_ts 形状: (B, N, seq_len) = (B, N, 96)
-        q_obs = cond_ts.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)  # (B, N, P_cond)
-        v_obs = cond_ts.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)  # 复用相同逻辑
+        # 从外部传入的 q_obs/v_obs 或从条件历史提取
+        # q_obs/v_obs: (B*N, seq_len) -> (B, N, P_cond)
+        if q_obs is not None:
+            q_obs = rearrange(q_obs, '(b n) t -> b n t', n=N)
+            q_obs = q_obs.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)  # (B, N, P_cond)
+        else:
+            q_obs = cond_ts.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)
+        
+        if v_obs is not None:
+            v_obs = rearrange(v_obs, '(b n) t -> b n t', n=N)
+            v_obs = v_obs.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)
+        else:
+            v_obs = cond_ts.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)
         
         # ========== Step 4: STLWRGAT Layers ==========
         all_regimes = []
@@ -212,7 +224,8 @@ class PatchUVIT_STFormer(nn.Module):
         self.enc_in = configs.enc_in
     
     def forward(self, x, timesteps, cond_ts, x_mark_enc=None, **kwargs):
-        return self.model(x, timesteps, cond_ts, x_mark_enc)
+        # 修复：传递 q_obs 和 v_obs
+        return self.model(x, timesteps, cond_ts, x_mark_enc, **kwargs)
     
     def forward_for_diffusion(self, x, timesteps, cond_ts, x_mark_enc=None, **kwargs):
         """给 DPM-Solver 调用的接口，支持 pcgk_cache"""

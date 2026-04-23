@@ -21,42 +21,86 @@ class PhysicsComputedGraphKernel(nn.Module):
     - 相态判断：v > v_critical → 自由流；v ≤ v_critical → 拥堵流
     - 图核方向：自由流加强下游连接，拥堵流加强上游连接
     - v_critical 可学习，自动适配数据集
+    
+    关键设计（防止梯度消失）：
+    - temperature 使用 softplus 保证 > 0，初始 1.0（不是 5.0）
+    - v_critical 使用 clamp 限制范围
     """
 
-    def __init__(self, d_model, num_nodes, v_critical_init=30.0):
+    def __init__(self, d_model, num_nodes, v_critical_init=0.0, v_std=1.0):
         super().__init__()
 
         self.num_nodes = num_nodes
+        self.v_std = v_std  # 数据标准化时的标准差
 
-        # v_critical 可学习（用 softplus 保证 > 5 km/h）
-        self.raw_v_critical = nn.Parameter(torch.tensor(v_critical_init - 5.0))
-        self.v_critical_min = 5.0  # 最小临界速度
+        # v_critical 可学习（用 clamp 限制范围）
+        # 初始化为 0（在归一化空间中），对应原始数据的 0 km/h
+        self.raw_v_critical = nn.Parameter(torch.tensor(v_critical_init))
+        self.v_critical_min = -2.0  # 允许负值（在归一化空间）
+        self.v_critical_max = 3.0   # 归一化空间的上限
 
-        # 混合系数（可学习）
-        self.alpha = nn.Parameter(torch.tensor(0.7))
+        # 混合系数（可学习）- 使用 logit 表示
+        self.raw_alpha = nn.Parameter(torch.tensor(0.0))  # logit(0.7) ≈ 0.847
+        
+        # 关键修复：temperature 初始 1.0（不是 5.0），使用 softplus 保证正数
+        # softplus(x) = log(1 + exp(x))，初始值 1.0 表示 raw ≈ 0.54
+        self.raw_temperature = nn.Parameter(torch.log(torch.exp(torch.tensor(1.0)) - 1))
 
         # q 嵌入投影（用于节点特征相似度）
         self.q_proj = nn.Linear(d_model, 16)
 
-        print(f"  [PCGK] v_critical_init={v_critical_init} (learnable)")
+        print(f"  [PCGK] v_critical_init={v_critical_init} (normalized space)")
+        print(f"  [PCGK] temperature_init=1.0 (softplus, prev was 5.0)")
 
     @property
     def v_critical(self):
-        """可学习的临界速度（softplus 保证 > 5 km/h）"""
-        return F.softplus(self.raw_v_critical) + self.v_critical_min
+        """可学习的临界速度（在归一化空间中）"""
+        return torch.clamp(self.raw_v_critical, min=self.v_critical_min, max=self.v_critical_max)
+
+    @property
+    def temperature(self):
+        """温度系数（控制 sigmoid 平滑度），使用 softplus 保证 > 0"""
+        return F.softplus(self.raw_temperature)
+
+    @property
+    def alpha(self):
+        """混合系数，使用 sigmoid 保证在 [0, 1]"""
+        return torch.sigmoid(self.raw_alpha)
 
     def compute_regime(self, v_obs):
         """
-        计算相态：自由流 vs 拥堵流
+        计算相态：自由流 vs 拥堵流（可导版本）
+        
+        关键设计：
+        - temperature=1.0 时，活跃区扩大到 v_critical ± 2.0
+        - 对归一化数据（通常范围 [-2, +3]），大部分点都有非零梯度
         
         Args:
-            v_obs: (B, N, P) 速度观测
+            v_obs: (B, N, P) 速度观测（已归一化）
         
         Returns:
             regime: (B, N, 1) 相态概率，自由流=1，拥堵流=0
         """
-        v_clipped = torch.clamp(v_obs, 0, 150)  # 速度不超过 150 km/h
-        regime = (v_clipped > self.v_critical).float().mean(dim=-1, keepdim=True)
+        # 不使用 clamp！归一化数据不需要物理范围截断
+        # temperature=1.0 时，活跃区 ±2σ，覆盖大部分数据
+        x = (v_obs - self.v_critical) * self.temperature
+        regime = torch.sigmoid(x).mean(dim=-1, keepdim=True)
+        
+        # 调试：检查 v_critical 梯度
+        if self.training and (getattr(self, '_vc_debug', 0) % 500 == 0):
+            self._vc_debug = getattr(self, '_vc_debug', 0) + 1
+            # 手动计算梯度
+            sig = torch.sigmoid(x)
+            sig_mean = sig.mean(dim=-1, keepdim=True)
+            # d(regime)/d(v_critical) = d(sigmoid_mean)/d(x) * d(x)/d(v_critical)
+            # = sigmoid(x) * (1 - sigmoid(x)) * (-temperature)
+            dL_dvc = (-self.temperature * sig * (1 - sig)).mean()
+            print(f"[PCGK] v_crit={self.v_critical.item():.4f}, temp={self.temperature.item():.4f}")
+            print(f"[PCGK] dL/dv_crit ≈ {dL_dvc.item():.6f}")
+            print(f"[PCGK] v_obs mean={v_obs.mean().item():.4f}, x mean={x.mean().item():.4f}")
+        else:
+            self._vc_debug = getattr(self, '_vc_debug', 0) + 1
+        
         return regime
 
     def forward(self, q_embed, q_obs, A_phys_down, A_phys_up, A_adp=None, return_regime=False, v_obs=None):
@@ -117,18 +161,27 @@ class PhysicsComputedGraphKernel(nn.Module):
         A_kernel = A_kernel * A_mask.unsqueeze(0)
 
         # ========== Step 6: 可学习混合 ==========
-        alpha = torch.sigmoid(self.alpha)
-        if A_adp is not None:
-            A_eff = alpha * A_kernel + (1 - alpha) * A_adp.unsqueeze(0)
-        else:
-            A_eff = A_kernel
+        # 修复：让 alpha 始终参与计算
+        if A_adp is None:
+            # 零矩阵保留梯度路径，alpha 控制物理核的自保留比例
+            A_adp = torch.zeros(B, N, N, device=q_obs.device)
+        
+        # self.alpha 已经是 property（sigmoid 后的值）
+        A_eff = self.alpha * A_kernel + (1 - self.alpha) * A_adp
 
         return (A_eff, regime) if return_regime else A_eff
 
 
 # ============== 空间 GAT 层 ==============
 class SpatialGATLayer(nn.Module):
-    """空间 GAT 层 - 向量化版本"""
+    """
+    新架构：物理传播主导 + 数据修正
+    
+    关键设计：
+    - 分支1（物理）：A_kernel @ h 直接做矩阵乘法，物理图核直接决定聚合
+    - 分支2（数据）：只在物理残差上做轻量attention
+    - 组合：beta_phys 控制物理 vs 数据驱动
+    """
 
     def __init__(self, d_model, n_heads, dropout=0.1):
         super().__init__()
@@ -136,14 +189,19 @@ class SpatialGATLayer(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
 
+        # 物理驱动分支：直接矩阵乘法
+        self.W_phys = nn.Linear(d_model, d_model)
+        
+        # 数据驱动分支：轻量attention（只在物理残差上）
         self.W_q = nn.Linear(d_model, d_model)
         self.W_k = nn.Linear(d_model, d_model)
         self.W_v = nn.Linear(d_model, d_model)
         self.W_o = nn.Linear(d_model, d_model)
 
-        self.log_A_weight = nn.Parameter(torch.tensor(0.5))
+        # 可学习混合：物理 vs 数据
+        self.beta_phys = nn.Parameter(torch.tensor(0.7))  # 初始 70% 物理主导
+        
         self.dropout = nn.Dropout(dropout)
-        self.beta = nn.Parameter(torch.zeros(1))
 
     def forward(self, h, A_graph):
         """
@@ -157,47 +215,56 @@ class SpatialGATLayer(nn.Module):
         B, N, P, d = h.shape
         A_graph = A_graph.to(h.device)
 
-        # === 1. QKV 投影 ===
-        q = self.W_q(h)  # (B, N, P, d)
-        k = self.W_k(h)
-        v = self.W_v(h)
+        # === 分支 1：物理传播（主导）===
+        # A_graph @ h：对每个 patch 做节点维度的图传播
+        # h: (B, N, P, d) -> transpose -> (B, P, N, d) -> (B*P, N, d)
+        h_2d = h.permute(0, 2, 1, 3).reshape(B * P, N, d)  # (B*P, N, d)
+        
+        # 物理传播：A_graph @ h
+        # A_graph: (B, N, N) -> (B*P, N, N) 通过 expand
+        A_exp = A_graph.unsqueeze(1).expand(B, P, N, N).reshape(B * P, N, N)
+        
+        h_phys = torch.bmm(A_exp, h_2d)  # (B*P, N, d) = (B*P, N, N) @ (B*P, N, d)
+        h_phys = self.W_phys(h_phys)  # 投影
+        
+        # reshape back: (B*P, N, d) -> (B, N, P, d)
+        h_phys = h_phys.reshape(B, P, N, d).permute(0, 2, 1, 3)  # (B, N, P, d)
 
-        # === 2. reshape: (B, N, P, d) → (B*P, N, d) → (B*P, H, N, d_h) ===
-        # 把 Patch 维度 batch 化，消除循环
-        q = q.permute(0, 2, 1, 3).reshape(B * P, N, d)   # (B*P, N, d)
+        # === 分支 2：数据驱动 attention（辅助修正）===
+        # 只在物理残差上做 attention
+        h_residual = h - h_phys.detach()  # detach 防止物理分支被 attention 干扰
+        
+        q = self.W_q(h_residual)  # (B, N, P, d)
+        k = self.W_k(h_residual)
+        v = self.W_v(h_residual)
+
+        # reshape for multi-head attention
+        q = q.permute(0, 2, 1, 3).reshape(B * P, N, d)
         k = k.permute(0, 2, 1, 3).reshape(B * P, N, d)
         v = v.permute(0, 2, 1, 3).reshape(B * P, N, d)
 
-        q = q.view(B * P, N, self.n_heads, self.d_head).transpose(1, 2)   # (B*P, H, N, d_h)
+        q = q.view(B * P, N, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B * P, N, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B * P, N, self.n_heads, self.d_head).transpose(1, 2)
 
-        # === 3. attention: (B*P, H, N, N) ===
+        # attention
         scale = self.d_head ** 0.5
         attn = (q @ k.transpose(-2, -1)) / scale
-
-        # === 4. 物理图核先验 ===
-        # A_graph: (B, N, N) → (B*P, 1, N, N)
-        A_exp = A_graph.unsqueeze(1).repeat(1, P, 1, 1).reshape(B * P, 1, N, N)
-        log_A = torch.log(A_exp + 1e-10)
-        attn = attn + torch.sigmoid(self.log_A_weight) * log_A
-
-        # === 5. mask + softmax ===
-        mask = (A_exp > 0).expand(-1, self.n_heads, -1, -1)
-        attn = attn.masked_fill(~mask, -1e9)
         attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn) * mask.float()
+        attn = self.dropout(attn)
 
-        # === 6. 聚合 + 恢复形状 ===
-        h_agg = (attn @ v).transpose(1, 2).reshape(B * P, N, d)   # (B*P, N, d)
-        h_agg = self.W_o(h_agg)
+        h_attn = (attn @ v).transpose(1, 2).reshape(B * P, N, d)
+        h_attn = self.W_o(h_attn)
+        
+        # reshape back: (B*P, N, d) -> (B, N, P, d)
+        h_attn = h_attn.reshape(B, P, N, d).permute(0, 2, 1, 3)  # (B, N, P, d)
 
-        # (B*P, N, d) → (B, P, N, d) → (B, N, P, d)
-        h_out = h_agg.reshape(B, P, N, d).permute(0, 2, 1, 3)
+        # === 组合：物理主导 + 数据修正 ===
+        beta = torch.sigmoid(self.beta_phys)
+        h_out = beta * h_phys + (1 - beta) * h_attn
 
-        # === 7. 残差 ===
-        beta = torch.sigmoid(self.beta)
-        return h + beta * (h_out - h)
+        # 残差连接
+        return h + h_out
 
 
 # ============== 时间注意力层 ==============
@@ -378,9 +445,6 @@ class DualStreamSTLWRGAT(nn.Module):
         ])
 
         self.output = PhysicsDecoupledOutput(d_model, pred_len)
-
-        total_params = sum(p.numel() for p in self.parameters())
-        print(f"  [DualStreamSTLWRGAT] layers={n_layers}, params={total_params:,}")
 
     def precompute_pcgk(self, h_embed, q_obs, v_obs, A_phys_down, A_phys_up):
         """

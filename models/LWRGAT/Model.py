@@ -38,14 +38,14 @@ class Model(nn.Module):
         self.enc_in = configs.enc_in
         self.batch_size = configs.batch_size
 
+        self.nn = PatchUVIT_STFormer(configs)
+        
         # 初始化主干网络：STFormerBone
         print("\n" + "="*60)
         print("[LWRGAT Model] Initializing")
         print(f"  seq_len={self.seq_len}, pred_len={self.pred_len}")
         print(f"  d_model={self.d_model}, enc_in={self.enc_in}")
         print(f"  diffusion steps={self.diff_steps}")
-        
-        self.nn = PatchUVIT_STFormer(configs)
         
         # 扩散参数
         self.beta_start = 1e-4
@@ -131,14 +131,16 @@ class Model(nn.Module):
         return alpha_t * x_start + one_minus_t * noise
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5,
+                flow_x=None, flow_y=None):
         """前向传播，根据模式选择训练或推理"""
         if self.training:
             return self.forward_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                         enc_self_mask, dec_self_mask, dec_enc_mask)
+                                     enc_self_mask, dec_self_mask, dec_enc_mask,
+                                     flow_x=flow_x, flow_y=flow_y)
         else:
             return self.forward_val_test(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                            enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
+                                        enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
     
     def forward_for_diffusion(self, x, t, cond, x_mark_enc=None, **kwargs):
         """
@@ -196,11 +198,23 @@ class Model(nn.Module):
         return model_out.permute(0, 2, 1).reshape(B * N, -1)
 
     def forward_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None,
+                flow_x=None, flow_y=None):
         """
         训练模式：添加噪声并预测 (NI - Normalization Independence)
         """
         x_target = x_dec[:, -self.configs.pred_len:, :]
+        
+        # 提取 q_obs 和 v_obs 用于 PCGK
+        # flow_x: (B, L, N) 流量序列
+        if flow_x is not None:
+            # flow_x 已归一化，直接用
+            q_obs = flow_x.permute(0, 2, 1)  # (B, N, L)
+            v_obs = flow_x.permute(0, 2, 1)  # 复用（实际场景中流量和速度成正比）
+        else:
+            # fallback：使用 x_enc 的速度数据
+            q_obs = x_enc.permute(0, 2, 1)  # (B, N, L)
+            v_obs = x_enc.permute(0, 2, 1)
         
         if self.configs.new_norm:
             # NI 实现：条件序列用 RevIN 归一化，目标序列用自己统计量归一化
@@ -220,14 +234,20 @@ class Model(nn.Module):
             cond_flat = cond_ts.reshape(B * N, L1)
             x_flat = x_norm.reshape(B * N, L2)
             
+            # q_obs/v_obs 也归一化并 reshape
+            q_obs_norm = self.revin_layer(q_obs.permute(0, 2, 1), 'norm').permute(0, 2, 1)
+            q_obs_flat = q_obs_norm.reshape(B * N, -1)  # (B*N, L)
+            v_obs_flat = q_obs_norm.reshape(B * N, -1)  # (B*N, L) - 复用
+            
             # 时间步和噪声
             t = torch.randint(0, self.num_timesteps, size=[B * N // 2]).long()
             t = torch.cat([t, self.num_timesteps - 1 - t], dim=0)
             noise = torch.randn_like(x_flat)
             x_k = self.noise_ts(x_start=x_flat, t=t, noise=noise)
             
-            # FormerBone 前向
-            model_out_flat = self.nn(x_k, t, cond_flat, x_mark_enc)
+            # FormerBone 前向（传入 q_obs 和 v_obs）
+            model_out_flat = self.nn(x_k, t, cond_flat, x_mark_enc,
+                                    q_obs=q_obs_flat, v_obs=v_obs_flat)
             
             # 反归一化
             model_out = model_out_flat.reshape(B, N, L2)
@@ -257,7 +277,13 @@ class Model(nn.Module):
 
             x_k_flat = x_k.reshape(B * N, dec_L)
             cond_flat = cond_norm.reshape(B * N, -1)
-            model_out_flat = self.nn(x_k_flat, t, cond_flat)
+            
+            # q_obs/v_obs 归一化
+            q_obs_norm = (q_obs - mean_) / std_
+            q_obs_flat = q_obs_norm.reshape(B * N, -1)
+            v_obs_flat = q_obs_flat
+            
+            model_out_flat = self.nn(x_k_flat, t, cond_flat, q_obs=q_obs_flat, v_obs=v_obs_flat)
 
             model_out = model_out_flat.reshape(B, N, dec_L)
             model_out = model_out * std_ + mean_
@@ -298,9 +324,7 @@ class Model(nn.Module):
         
         # ========== [关键优化] 预计算 PCGK ==========
         # 条件历史在整个采样过程中不变，只算一次
-        print(f"[PCGK Cache] Precomputing PCGK for {B} samples...", flush=True)
         self._pcgk_cache = self.nn.precompute_pcgk(x_past_flat)
-        print(f"[PCGK Cache] Cached {len(self._pcgk_cache)} layers", flush=True)
         
         for i in range(sample_times):
             start_code = torch.randn((batchs, nL), device=self.device)
@@ -328,9 +352,6 @@ class Model(nn.Module):
                 diff_samples = diff_samples.permute(0, 2, 1)
             
             all_outs.append(diff_samples)
-            
-            if i == 0:
-                print(f"[PCGK Cache] Using cached PCGK for remaining {sample_times - 1} samples", flush=True)
         
         all_outs = torch.stack(all_outs, dim=0)  # (M, B, N, pred_len)
         outs = self.aggregator.aggregate(all_outs)

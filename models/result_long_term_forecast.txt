@@ -1,6 +1,84 @@
-long_term_forecast_lwrdiff_96_12_stformer_v2_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_stformer_phase2_lightweight_0  
-mse:0.7742944359779358, mae:0.6209236979484558, rmse:0.8799400329589844, mape:3.403768539428711, mspe:7221.47607421875
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8882257342338562, mae:0.6865372657775879, rmse:0.9424572587013245, mape:2.167041063308716, mspe:4447.0732421875
 
-long_term_forecast_lwrdiff_96_12_stformer_v2_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_stformer_phase2_lightweight_0  
-mse:0.7742944359779358, mae:0.6209236979484558, rmse:0.8799400329589844, mape:3.403768539428711, mspe:7221.47607421875
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8924586772918701, mae:0.6868765950202942, rmse:0.944700300693512, mape:2.3387203216552734, mspe:5657.6044921875
+
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8884834051132202, mae:0.6873993277549744, rmse:0.9425939917564392, mape:2.17695689201355, mspe:4278.5224609375
+
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8198010325431824, mae:0.6463057994842529, rmse:0.9054286479949951, mape:2.9013495445251465, mspe:7677.71728515625
+
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8242884278297424, mae:0.6493759155273438, rmse:0.9079033136367798, mape:2.9362287521362305, mspe:9527.658203125
+
+long_term_forecast_lwrdiff_phase1_pcgk_LWRdiff_custom_ftM_sl96_ll48_pl12_dm64_nh4_el1_dl1_df256_ebtimeF_pcgk_gat_phase1_0  
+mse:0.8766810894012451, mae:0.6780520677566528, rmse:0.9363124966621399, mape:3.719986915588379, mspe:17371.810546875
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8477832674980164, mae:0.6607023477554321, rmse:0.9207514524459839, mape:2.533581018447876, mspe:7553.7568359375
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8320518732070923, mae:0.6550177931785583, rmse:0.9121688008308411, mape:2.4493026733398438, mspe:5595.2431640625
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8320518732070923, mae:0.6550177931785583, rmse:0.9121688008308411, mape:2.4493026733398438, mspe:5595.2431640625
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8324041366577148, mae:0.655593752861023, rmse:0.9123618602752686, mape:2.3701422214508057, mspe:4713.359375
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8961136341094971, mae:0.7014949917793274, rmse:0.9466328024864197, mape:1.6526198387145996, mspe:1016.179443359375
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.9539040327072144, mae:0.7330012321472168, rmse:0.9766800999641418, mape:2.234651803970337, mspe:2457.909423828125
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_quick_test_0  
+mse:0.8852766752243042, mae:0.6937907934188843, rmse:0.940891444683075, mape:2.2820069789886475, mspe:2220.035888671875
+
+long_term_forecast_lwrdiff_phase2_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_custom_ftM_0  
+mse:0.8807300925254822, mae:0.6811916828155518, rmse:0.9384722113609314, mape:3.022341012954712, mspe:16292.5888671875
+
+long_term_forecast_lwrdiff_phase2_temp_fixed_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_temp_fixed_0  
+mse:0.8865041732788086, mae:0.6785277724266052, rmse:0.9415435194969177, mape:3.1167349815368652, mspe:14473.2470703125
+
+long_term_forecast_lwrdiff_phase2_v_obs_speed_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_v_obs_speed_0  
+mse:0.872157633304596, mae:0.6682291030883789, rmse:0.9338937997817993, mape:3.025686264038086, mspe:11094.5087890625
+
+long_term_forecast_lwrdiff_phase2_v_obs_speed_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_v_obs_speed_0  
+mse:0.872157633304596, mae:0.6682291030883789, rmse:0.9338937997817993, mape:3.025686264038086, mspe:11094.5087890625
+
+long_term_forecast_lwrdiff_phase2_row_norm_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_row_norm_0  
+mse:0.8746960163116455, mae:0.6713111400604248, rmse:0.9352518320083618, mape:2.5394582748413086, mspe:8790.703125
+
+long_term_forecast_lwrdiff_phase2_row_norm_v2_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_row_norm_v2_0  
+mse:0.8700886368751526, mae:0.6731905937194824, rmse:0.9327853918075562, mape:2.3818705081939697, mspe:7742.978515625
+
+long_term_forecast_lwrdiff_phase2_st_layers3_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_st_layers3_0  
+mse:0.8972477316856384, mae:0.6869035959243774, rmse:0.9472315907478333, mape:2.382528781890869, mspe:6803.8349609375
+
+long_term_forecast_lwrdiff_phase2_row_norm_v2_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_row_norm_v2_0  
+mse:0.8778935074806213, mae:0.6683511734008789, rmse:0.9369597434997559, mape:2.785672903060913, mspe:13176.0
+
+long_term_forecast_lwrdiff_phase2_best_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_best_full_0  
+mse:0.833136796951294, mae:0.6472356915473938, rmse:0.9127632975578308, mape:2.9949331283569336, mspe:13105.0087890625
+
+long_term_forecast_lwrdiff_phase2_best_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_best_full_0  
+mse:0.8402358293533325, mae:0.6514483690261841, rmse:0.9166437983512878, mape:2.7744944095611572, mspe:13462.078125
+
+long_term_forecast_lwrdiff_phase2_rw_norm_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_random_walk_norm_0  
+mse:0.8400490283966064, mae:0.6510384678840637, rmse:0.9165418744087219, mape:3.0080325603485107, mspe:16571.5078125
+
+long_term_forecast_lwrdiff_phase2_temp_residual_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_temporal_residual_0  
+mse:0.8737448453903198, mae:0.6659703850746155, rmse:0.9347432255744934, mape:3.292381763458252, mspe:22719.294921875
+
+long_term_forecast_lwrdiff_phase2_dual_head_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_dual_head_trend_residual_0  
+mse:0.8729428648948669, mae:0.6668558716773987, rmse:0.9343141317367554, mape:2.8174374103546143, mspe:12805.60546875
+
+long_term_forecast_lwrdiff_phase2_dual_head_vc0_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_dual_head_vc0_reslow_0  
+mse:0.8704305291175842, mae:0.6675340533256531, rmse:0.9329686760902405, mape:2.6737706661224365, mspe:10138.861328125
+
+long_term_forecast_lwrdiff_phase2_dual_head_d96_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm96_nh4_el2_dl1_df384_ebtimeF_LWRRes_dual_head_d96_0  
+mse:0.8898635506629944, mae:0.6817877888679504, rmse:0.9433258175849915, mape:2.3299124240875244, mspe:5991.37646484375
 

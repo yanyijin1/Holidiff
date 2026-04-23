@@ -1,725 +1,624 @@
-# ST-LWR-GAT: 物理约束时空图注意力网络
+# LWR-ResDiff：基于交通流守恒律的残差扩散预测模型
 
-> 基于 LWR 交通流守恒律的时空联合扩散预测模型设计
+> **S-LWR-GAT: Spatio-Temporal LWR-Constrained Graph Attention Network with Residual Diffusion**
 
 ---
 
 ## 摘要
 
-本文档描述 **ST-LWR-GAT** (Spatio-Temporal LWR-constrained Graph Attention Network) 的设计与实现。
-
-**核心设计**：
-1. **双流输入**：q（流量）和 v（速度）作为独立物理量输入
-2. **PCGK**：用速度阈值判断相态，控制信息传播方向
-3. **物理图核**：自由流向下游传播，拥堵流向上游回溢
-4. **输出正确**：v-Stream 在图核上传播后的结果即为输出
+本文提出 LWR-ResDiff，一种将 Lighthill-Whitham-Richards (LWR) 交通流守恒律嵌入深度扩散框架的时空预测方法。与现有"物理特征作为输入"或"物理先验作为注意力偏置"的补丁式设计不同，本方法将 LWR 方程的数值格式作为每层空间传播的核心算子，通过**相态依赖的图卷积**实现宏观守恒传播；扩散模型仅在**物理残差空间**进行去噪，学习 LWR 无法解释的微观不确定性。该设计保留了 DCRNN 的交替时空深度结构，同时确保物理参数（临界速度、温度系数）获得非消失梯度，兼具物理可解释性与数据驱动灵活性。
 
 ---
 
-## 一、理论框架
+## 1. 问题背景与动机
 
-### 1.1 LWR 守恒律
+### 1.1 现有方法的局限
 
-**LWR 守恒律方程：**
+当前交通预测中的物理约束引入方式主要有两类：
+
+**类型 A：物理特征作为输入通道**
+
+将流量、速度、密度等物理量拼接为输入向量，与原始序列一起送入 Transformer 或 GNN。此类方法仅让模型"看到"物理量，但未强制模型"服从"物理规律。物理与数据驱动部分无明确分工。
+
+**类型 B：物理先验作为注意力偏置**
+
+在图注意力（GAT）的 logits 中加入物理权重：
+
+$$
+\alpha_{ij} = \text{softmax}_j\left(\frac{Q_i K_j^T}{\sqrt{d}} + \lambda \log A_{ij}^{phys}\right)
+$$
+
+此类方法的根本缺陷在于：当节点嵌入已经编码了空间相关性时，$Q_i K_j^T$ 本身已很大，物理权重 $\log A_{ij}$ 对 softmax 分布的边际影响极小。数学上，当 $\text{softmax}_j \approx \delta_{ij}$（注意力已集中在正确邻居）时：
+
+$$
+\frac{\partial \log A_{ij}}{\partial \text{softmax}_i} = \text{softmax}_i (\delta_{ij} - \text{softmax}_j) \cdot \lambda \to 0
+$$
+
+**物理参数的梯度被注意力机制的"自我饱和"效应抵消，导致不可学习。**
+
+### 1.2 我们的核心主张
+
+> **物理传播不应是注意力的"调味料"，而应是空间聚合的"主厨"。扩散模型不应在原始信号空间去噪，而应在物理守恒律之外的残差空间去噪。**
+
+---
+
+## 2. LWR 方程的图结构解释
+
+### 2.1 从守恒律到图传播
+
+LWR 方程（一维）：
 
 $$
 \frac{\partial q}{\partial t} + \frac{\partial f(q)}{\partial x} = 0
 $$
 
-其中：
-- $q$: 交通密度（或流量）
-- $f(q)$: 交通流量函数（由基本图 Fundamental Diagram 决定）
-
-**空间离散化（Godunov 格式）：**
-
-将道路网建模为有向图 $\mathcal{G} = (\mathcal{V}, \mathcal{E})$，节点 $i$ 代表路段/传感器，边 $(i,j)$ 代表物理连接。对每条边应用有限体积法：
+其中 $q$ 为密度，$f(q)$ 为流量函数。将道路网离散为有向图 $\mathcal{G} = (\mathcal{V}, \mathcal{E})$，节点 $i$ 代表传感器/路段，应用 Godunov 有限体积格式：
 
 $$
 q_i^{t+1} = q_i^t - \frac{\Delta t}{\Delta x} \sum_{j \in \mathcal{N}(i)} \left[ f(q_i^t, q_j^t) \cdot \mathbb{1}_{i \to j} - f(q_j^t, q_i^t) \cdot \mathbb{1}_{j \to i} \right]
 $$
 
-**图神经网络重写：**
+**图神经网络视角**：上式可重写为矩阵形式
 
 $$
 \mathbf{q}^{t+1} = \mathbf{q}^t + \Delta t \cdot \mathbf{D}(\mathbf{q}^t) \cdot \mathbf{q}^t
 $$
 
-其中 $\mathbf{D}(\mathbf{q}^t)$ 是**状态依赖的图差分算子**。
+其中 $\mathbf{D}(\mathbf{q}^t)$ 是**状态依赖的图差分算子**。这启示我们：交通流的空间传播本质上是图上的**矩阵乘法**，而非消息传递中的注意力加权。
 
-### 1.2 信息传播方向
+### 2.2 相态与传播方向
 
-交通流的信息传播具有明确的物理方向性：
+交通流存在明确的相态（Regime）：
 
-- **自由流** ($v > v_{critical}$): 拥堵向下游传播
-- **拥堵流** ($v \leq v_{critical}$): 拥堵向上游回溢
+- **自由流**（$v > v_c$）：信息向下游传播（车辆向前行驶）
+- **拥堵流**（$v \leq v_c$）：拥堵波向上游回溢（排队向后扩散）
 
-这意味着图上的边权重应该是**有向的、不对称的**，与相态相关。
-
-### 1.3 物理先验的聚合函数
-
-LWR 方程给出了一种**物理约束的聚合函数**：
+激波速度由 LWR 特征速度给出：
 
 $$
-h_i^{(l+1)} = \underbrace{\text{LWR-Update}(h_i^{(l)}, \mathcal{N}(i))}_{\text{物理骨架}} + \underbrace{\text{GNN-Residual}(h_i^{(l)}, \mathcal{N}(i))}_{\text{数据驱动修正}}
+v_w = \frac{df}{dq}
 $$
 
-**关键洞察**：GNN 应该学习的是**物理守恒律无法解释的残差修正**，这使得模型既具有物理可解释性，又能适应数据中的复杂模式。
+在自由流区 $v_w > 0$，在拥堵区 $v_w < 0$。这意味着图的有效边方向会随交通状态改变。
 
 ---
 
-## 二、时空大图：形式化定义
+## 3. 物理图核：相态驱动的有向图卷积
 
-### 2.1 节点集合
+### 3.1 图核计算流程
 
-$$
-\mathcal{V}_{ST} = \{(i, p) \mid i = 1, \ldots, N; \ p = 1, \ldots, P\}
-$$
+**输入**：
+- $q_{obs} \in \mathbb{R}^{B \times N \times P}$：真实流量观测（用于流量强度门控）
+- $v_{obs} \in \mathbb{R}^{B \times N \times P}$：真实速度观测（用于相态检测）
+- $A_{down}, A_{up} \in \mathbb{R}^{N \times N}$：上下游物理拓扑（固定，来自路网结构）
 
-总节点数 $|\mathcal{V}_{ST}| = N \times P$。每个节点代表"路段 $i$ 的第 $p$ 个时间 patch"。
+**Step 1：相态检测（可导版本）**
 
-### 2.2 边集合
-
-$\mathcal{E}_{ST}$ 包含两类边：
-
-**空间边 (Spatial Edges) $\mathcal{E}_S$：**
-- 同 patch $p$ 内，物理相邻的路段 $(i,j)$ 之间有边
-- 边权重由**物理邻接矩阵** $\mathbf{A}_{phys}$ 初始化
-- 区分上下游方向：$(i \to j)$ 和 $(j \to i)$
-
-**时间边 (Temporal Edges) $\mathcal{E}_T$：**
-- 同路段 $i$ 内，相邻 patch $p$ 与 $p+1$ 之间有边
-- 边权重可固定（局部因果）或可学习（长程依赖）
-- 在扩散去噪中，允许信息从"已去噪 patch"流向"待去噪 patch"
-
-### 2.3 邻接矩阵的数学形式
+为避免硬阈值导致的梯度消失，采用带温度系数的 sigmoid：
 
 $$
-\mathbf{A}_{ST} = \begin{bmatrix} \mathbf{A}_{phys} \otimes \mathbf{I}_P & \mathbf{I}_N \otimes \mathbf{A}_{temp} \end{bmatrix}
+r_i = \sigma\left(\frac{1}{P}\sum_{p=1}^{P} v_{obs}(i,p) - v_c \cdot T\right), \quad \bar{v}_i = \frac{1}{P}\sum_{p=1}^{P} v_{obs}(i,p)
 $$
 
-简化实现：在 $(N, P)$ 网格上做轴向注意力。
+其中 $v_c$ 为可学习临界速度，$T$ 为可学习温度系数。$r_i \to 1$ 表示自由流，$r_i \to 0$ 表示拥堵。
+
+**Step 2：方向性加权**
+
+$$
+w_{ij} = r_i \cdot A_{ij}^{down} + (1 - r_i) \cdot A_{ij}^{up}
+$$
+
+- 自由流节点 $i$：$w_{ij}$ 激活下游边（$j$ 是 $i$ 的下游邻居）
+- 拥堵节点 $i$：$w_{ij}$ 激活上游边（$j$ 是 $i$ 的上游邻居）
+
+**Step 3：流量强度门控**
+
+$$
+s_{ij} = \frac{\min(\bar{q}_i, \bar{q}_j)}{\max(\bar{q}_i, \bar{q}_j) + \epsilon}, \quad \bar{q}_i = \frac{1}{P}\sum_{p=1}^{P} q_{obs}(i,p)
+$$
+
+$$
+w'_{ij} = w_{ij} \cdot (0.5 + 0.5 \cdot s_{ij})
+$$
+
+相似流量强度的节点间权重更高，反映交通传播的同质性。
+
+**Step 4：归一化**
+
+$$
+A_{LWR} = \text{RowSoftmax}(w') \odot A_{mask}
+$$
+
+其中 $A_{mask} = \text{clamp}(A_{down} + A_{up}, 0, 1)$ 屏蔽不存在的物理边。
+
+### 3.2 与自适应邻接的融合
+
+$$
+A_{eff} = \alpha \cdot A_{LWR} + (1 - \alpha) \cdot A_{adp}
+$$
+
+$\alpha = \sigma(\theta_\alpha)$ 为可学习混合系数，$A_{adp} = \text{softmax}(\text{ReLU}(E_1 E_2^T))$ 为数据驱动的自适应邻接。当物理拓扑稀疏或不准时，$\alpha$ 可自动降低，由自适应邻接补充。
 
 ---
 
-## 三、核心设计：PCGK
+## 4. 交替时空传播层
 
-### 3.1 设计原则
+### 4.1 设计原则：保留 DCRNN 模式
 
-| 方案 | 图核来源 | 物理约束 |
-|------|---------|---------|
-| 自适应学习 | $\mathbf{A} = \text{softmax}(\mathbf{E}_1 \mathbf{E}_2^T)$ | 无 |
-| **PCGK** | $\mathbf{A} = f_{regime}(v_{obs})$ | 相态方向物理 |
-
-### 3.2 物理图核计算流程
-
-**Step 1: 相态检测**
+借鉴 DCRNN 的交替传播策略，每层由空间传播（LWR 图卷积）与时间交互（Patch 间注意力）串行组成：
 
 $$
-r_i = \mathbb{1}(v_i > v_{critical}) \in \{0, 1\}
+\text{层 } l: \mathbf{H}^{(l)} \xrightarrow{\text{LWR-Spatial}} \mathbf{H}_{phys}^{(l)} \xrightarrow{\text{Temporal}} \mathbf{H}^{(l+1)}
 $$
 
-**Step 2: 方向性加权**
+**关键**：空间传播不由 Attention 主导，而由 $A_{LWR} \cdot \mathbf{H}$ 矩阵乘法主导。
+
+### 4.2 LWR-Spatial 传播（核心算子）
+
+对每层输入 $\mathbf{H} \in \mathbb{R}^{B \times N \times P \times d}$：
+
+**Step 1：计算物理图核**
 
 $$
-w_{ij} = r_i \cdot A^{down}_{ij} + (1 - r_i) \cdot A^{up}_{ij}
+A_{LWR}^{(l)} = \text{PCGK}(q_{obs}, v_{obs}, A_{down}, A_{up})
 $$
 
-- 当 $r_i = 1$（自由流）：加强向下游的连接
-- 当 $r_i = 0$（拥堵流）：加强向上游的连接（回溢）
+> **注意**：$A_{LWR}^{(l)}$ 在每一层重新计算，因为前层传播可能改变节点状态，相态可能变化。
 
-**Step 3: 流量强度门控**
+**Step 2：矩阵乘法传播（替代 Attention）**
 
-$$
-w'_{ij} = w_{ij} \cdot \frac{\min(q_i, q_j)}{\max(q_i, q_j) + \epsilon}
-$$
-
-相似流量强度的节点之间权重更高。
-
-**Step 4: 行归一化**
+对每个 patch $p$：
 
 $$
-\mathbf{A}_{kernel} = \text{RowSoftmax}(\mathbf{w}')
+\mathbf{H}_{phys}^{(l,p)} = A_{LWR}^{(l)} \cdot \mathbf{H}^{(l,p)} \in \mathbb{R}^{B \times N \times d}
 $$
 
-**Step 4.5: 熵检测（验证图核是否退化）**
-
-```python
-row_entropy = -(A_kernel * torch.log(A_kernel + 1e-10)).sum(dim=-1)
-max_entropy = torch.log(torch.tensor(N, dtype=torch.float32))
-entropy_ratio = row_entropy.mean() / max_entropy
-# 预期：0.3~0.7（有一定集中度，不是完全均匀）
-# 如果 >0.9，说明物理方向性没体现出来
-```
-
-**Step 5: 可学习混合**
+即：
 
 $$
-\alpha = \sigma(\theta_{mix})
+h_{phys,i}^{(l,p)} = \sum_{j \in \mathcal{N}(i)} A_{LWR,ij}^{(l)} \cdot h_j^{(l,p)}
+$$
+
+**物理意义**：节点 $i$ 的特征由其物理邻居按 LWR 权重聚合。权重由当前交通相态决定，拥堵时从上游聚合，自由流时从下游聚合。
+
+**Step 3：轻量 FFN 修正**
+
+$$
+\mathbf{H}_{out}^{(l)} = \mathbf{H}_{phys}^{(l)} + \text{FFN}(\text{LayerNorm}(\mathbf{H}_{phys}^{(l)}))
+$$
+
+FFN 负责"物理传播后的非线性变换"，但不对传播方向做结构性改变。
+
+### 4.3 Temporal 交互（Patch 间）
+
+在时间维度 $P$ 上做局部自注意力（无因果掩码，适应扩散特性）：
+
+$$
+\mathbf{H}^{(l+1)} = \mathbf{H}_{out}^{(l)} + \text{TemporalAttn}(\text{LayerNorm}(\mathbf{H}_{out}^{(l)}))
+$$
+
+允许信息从"已去噪的 patch"流向"待去噪的 patch"，实现时间维度的残差修正传播。
+
+### 4.4 多层堆叠
+
+$$
+\mathbf{H}^{(0)} = \text{PatchEmbed}(v_{cond})
 $$
 
 $$
-\mathbf{A}_{eff} = \alpha \odot \mathbf{A}_{kernel} + (1 - \alpha) \odot \mathbf{A}_{adp}
+\text{for } l = 0, \ldots, L-1:
 $$
 
-### 3.3 物理图核设计要点
+$$
+A_{LWR}^{(l)} = \text{PCGK}(\cdot)
+$$
 
-- **拓扑掩码**：$\mathbf{A}_{phys}^{down}, \mathbf{A}_{phys}^{up}$ 来自路网结构
-- **流量强度门控**：相似流量强度的节点权重更高
-- **相态方向**：自由流向下游传播，拥堵流向上游回溢
+$$
+\mathbf{H}_{phys}^{(l)} = A_{LWR}^{(l)} \cdot \mathbf{H}^{(l)}
+$$
+
+$$
+\mathbf{H}^{(l+1)} = \text{Temporal}(\text{FFN}(\mathbf{H}_{phys}^{(l)}))
+$$
+
+**与 DCRNN 的对应关系**：
+
+| DCRNN | LWR-ResDiff | 说明 |
+|-------|-------------|------|
+| 空间：Diffusion Graph Conv | 空间：LWR-Graph Conv | 扩散卷积 → 相态依赖图卷积 |
+| 时间：GRU | 时间：Transformer Attention | RNN → Patch 间自注意力 |
+| 交替：Spatial → Temporal → 下一层 | 交替：LWR-Spatial → Temporal → 下一层 | 完全保留 |
+| 多层堆叠 | 多层堆叠 | 2~4 层 |
 
 ---
 
-## 四、模型架构
+## 5. 残差扩散框架
 
-### 4.1 输入输出规范
+### 5.1 为什么扩散应在残差空间
 
-**输入（双流独立）**：
-
-$$
-q_{obs} \in \mathbb{R}^{B \times N \times P}: \text{真实流量观测（标量，用于流量强度门控）}
-$$
+交通序列可分解为：
 
 $$
-\mathbf{v}_{obs} \in \mathbb{R}^{B \times N \times P}: \text{真实速度观测（用于相态检测）}
+v(t) = \underbrace{v_{LWR}(t)}_{\text{宏观守恒趋势}} + \underbrace{\delta(t)}_{\text{微观不确定性}}
 $$
 
-$$
-\mathbf{v}_{embed} \in \mathbb{R}^{B \times N \times P \times d}: \text{速度嵌入（特征传播载体）}
-$$
+| 特性 | 原始速度空间 | 残差空间 |
+|------|-------------|----------|
+| 方差 | 大（包含趋势） | 小（仅波动） |
+| 分布 | 多峰（拥堵/自由流混合） | 更接近单峰高斯 |
+| 物理约束 | 需要网络学习 | 已由 LWR 保证 |
+| 扩散步数 | 多 | 少 |
+| 可解释性 | 低 | 高（$v_{LWR}$ 可单独验证） |
+
+**关键洞察**：扩散模型最擅长学习"均值为 0 的噪声分布"。把趋势交给 LWR，扩散只负责"去噪"，各司其职。
+
+### 5.2 训练阶段
+
+**Step 1：物理基线预测**
+
+通过完整 LWR-ST 网络得到：
 
 $$
-\mathbf{A}_{phys}^{down}, \mathbf{A}_{phys}^{up} \in \mathbb{R}^{N \times N}: \text{上下游物理邻接矩阵}
+v_{LWR} = \text{OutputProj}(\mathbf{H}^{(L)}) \in \mathbb{R}^{B \times N \times pred\_len}
 $$
 
-**输出（显式分解）**：
+**Step 2：真实残差**
 
 $$
-\mathbf{pred} \in \mathbb{R}^{B \times N \times pred\_len}: \text{总预测 = pred\_lwr + pred\_res}
+\delta_{true} = v_{target} - v_{LWR}
 $$
 
-$$
-\mathbf{pred}_{lwr} \in \mathbb{R}^{B \times N \times pred\_len}: \text{物理骨架预测}
-$$
+**Step 3：残差加噪**
 
 $$
-\mathbf{pred}_{res} \in \mathbb{R}^{B \times N \times pred\_len}: \text{残差修正}
-$$
-
-$$
-\mathbf{r}_{out} \in \mathbb{R}^{B \times N \times 1}: \text{相态指示}
-$$
-
-### 4.2 维度检测（防跑崩）
-
-**检测点 1：输入维度对齐**
-
-```python
-def forward(self, q_obs, v_obs, v_embed, A_phys_down, A_phys_up):
-    assert q_obs.dim() == 3, f"q_obs must be (B,N,P), got {q_obs.shape}"
-    assert v_obs.dim() == 3, f"v_obs must be (B,N,P), got {v_obs.shape}"
-    assert v_embed.dim() == 4, f"v_embed must be (B,N,P,d), got {v_embed.shape}"
-    assert q_obs.shape == v_obs.shape
-    assert not torch.isnan(v_obs).any(), "v_obs contains NaN!"
-    assert not torch.isnan(q_obs).any(), "q_obs contains NaN!"
-```
-
-**检测点 2：图核归一化防 NaN**
-
-```python
-# 归一化后加检测
-A_kernel = F.softmax(w_masked, dim=-1)
-zero_rows = (A_kernel.sum(dim=-1) == 0).any()
-if zero_rows:
-    print(f"[WARN] A_kernel has zero rows!")
-assert not torch.isnan(A_kernel).any(), "A_kernel NaN!"
-```
-
-**检测点 3：相态范围**
-
-```python
-regime = (v_obs > self.v_critical).float().mean(dim=-1, keepdim=True)
-assert regime.min() >= 0 and regime.max() <= 1
-```
-
-### 4.2 层级结构
-
-```
-DualStreamSTLWRGAT
-├── Adaptive Adj: E1 @ E2.T (可学习)
-├── Layer 1: STLWRGATLayer (Serial, No Gate)
-│   ├── PCGK (q_obs + v_obs → A_kernel + regime)
-│   ├── SpatialGAT (v_embed + A_kernel → H_gat)
-│   └── TemporalAttention (H_gat → H_temp → H_out)
-├── Layer 2: STLWRGATLayer
-│   └── ...
-└── Output: PhysicsDecoupledOutput
-    ├── proj_lwr → pred_lwr
-    └── proj_res → pred_res
-    └── pred = pred_lwr + pred_res
-```
-
-**关键**：串行传播，不是并行+Gate！
-
-### 4.3 图注意力聚合
-
-**Query-Key-Value 投影：**
-
-$$
-\mathbf{Q} = \mathbf{W}_q \mathbf{H}, \quad \mathbf{K} = \mathbf{W}_k \mathbf{H}, \quad \mathbf{V} = \mathbf{W}_v \mathbf{H}
-$$
-
-**多头注意力（$h$ 个头）：**
-
-$$
-\alpha_{ij}^h = \frac{\exp(\text{LeakyReLU}(\mathbf{Q}_i^h \mathbf{K}_j^{h^T} / \sqrt{d_h} + \log \mathbf{A}_{ij}))}{\sum_{k \in \mathcal{N}(i)} \exp(\text{LeakyReLU}(\mathbf{Q}_i^h \mathbf{K}_k^{h^T} / \sqrt{d_h} + \log \mathbf{A}_{ik}))}
-$$
-
-其中 $\log \mathbf{A}_{ij}$ 是物理图核的先验加成。
-
-**特征聚合：**
-
-$$
-\mathbf{H}_{agg} = \text{Concat}_h(\boldsymbol{\alpha}^h \mathbf{V}^h) \mathbf{W}_o
-$$
-
-### 4.4 残差更新
-
-**残差形式：**
-
-$$
-\Delta \mathbf{H} = \text{MLP}([\mathbf{H}_{agg}; \mathbf{H}])
+t \sim \text{Uniform}(0, T), \quad \epsilon \sim \mathcal{N}(0, I)
 $$
 
 $$
-\beta = \sigma(\theta_\beta): \text{可学习步长}
+\delta_k = \sqrt{\bar{\alpha}_t} \cdot \delta_{true} + \sqrt{1 - \bar{\alpha}_t} \cdot \epsilon
+$$
+
+**Step 4：残差注入**
+
+将加噪残差作为额外通道注入每层输入：
+
+$$
+\mathbf{H}^{(0)} = \text{PatchEmbed}(v_{cond}) \oplus \text{ResEmbed}(\delta_k)
+$$
+
+其中 $\oplus$ 为拼接或加法，$\text{ResEmbed}$ 为轻量投影。
+
+**Step 5：网络预测残差**
+
+$$
+\delta_{pred} = \text{ResDenoiser}(\mathbf{H}^{(L)}, v_{LWR})
+$$
+
+**Step 6：损失函数**
+
+$$
+\mathcal{L} = \mathbb{E}_{t, \epsilon}\left[\frac{1}{\sqrt{\bar{\alpha}_t}} \|\delta_{pred} - \delta_{true}\|\right]
+$$
+
+分母为 SimDiff 的加权 MAE 形式，噪声更强的早期步骤获得更大权重。
+
+### 5.3 推理阶段
+
+**Step 1：确定性物理基线**
+
+$$
+v_{LWR} = \text{LWR-ST-Network}(v_{cond})
+$$
+
+（只算一次，条件历史不变）
+
+**Step 2：残差去噪**
+
+$$
+\delta_K \sim \mathcal{N}(0, I)
 $$
 
 $$
-\mathbf{H}_{new} = \mathbf{H} + \beta \odot \Delta \mathbf{H}
-$$
-
-### 4.5 时空交替传播
-
-借鉴 DCRNN 的交替传播策略：
-
-$$
-\text{层 } l \text{（空间层）}: \mathbf{H} \leftarrow \text{GAT-Spatial}(\mathbf{H}, \mathbf{A}_{kernel})
+\text{for } k = K, K-1, \ldots, 1:
 $$
 
 $$
-\text{层 } l+1 \text{（时间层）}: \mathbf{H} \leftarrow \text{Attention-Temporal}(\mathbf{H})
+\delta_{pred} = \text{ResDenoiser}(\delta_k, v_{LWR})
 $$
 
-在 Patch 维度 $P$ 上做注意力。
+$$
+\delta_{k-1} = \text{DPM-Solver}(\delta_k, \delta_{pred}, k)
+$$
 
-### 4.6 STLWRGATLayer 内部流程
+**Step 3：MoM 集成**
 
-```python
-def forward(self, v_embed, q_obs, v_obs, A_phys_down, A_phys_up, A_adp):
-    # 1. PCGK 用真实物理量生成图核
-    A_kernel, regime = self.pcgk(q_obs, v_obs, A_phys_down, A_phys_up, A_adp)
+$$
+\delta_0 = \text{Median-of-Means}(\{\delta_0^{(1)}, \ldots, \delta_0^{(n)}\})
+$$
 
-    # 2. 空间 GAT（物理传播）
-    H_gat = self.spatial_gat(v_embed, A_kernel)
+**Step 4：最终预测**
 
-    # 3. 时间 Attention（时间 refine）
-    H_temp = self.temporal_attn(H_gat)
-
-    # 4. 差分形式更新（无 Gate！）
-    # H_out = H_gat + beta_temp * (H_temp - H_gat)
-    # 时间层只贡献相对于物理骨架的偏差
-    H_out = H_gat + self.beta_temp * (H_temp - H_gat)
-
-    return H_out, A_kernel, regime
-```
-
-**关键**：
-- 不是双分支+Gate！是串行物理传播链
-- 时间层用差分形式：`H_out = H_gat + β * (H_temp - H_gat)`
-- β 可学习（默认 0.2），物理骨架更硬
+$$
+\hat{v} = v_{LWR} + \delta_0
+$$
 
 ---
 
-## 五、显式分解输出层
+## 6. 梯度分析：为什么物理参数不会消失
 
-### 5.1 为什么需要分解
+### 6.1 梯度链
 
-**核心问题**：如果只输出 v_embed 再接一个 output_proj，退化为普通 GAT，无法体现 q-Stream 和 v-Stream 的解耦意义。
+$$
+\mathcal{L} = \|\delta_{pred} - \delta_{true}\|^2
+$$
 
-**解决**：显式分解为 `pred_lwr + pred_res`
+$$
+\delta_{pred} = \text{GNN}(\mathbf{H}^{(L)}, v_{LWR}, A_{LWR}^{(L)})
+$$
 
-### 5.2 PhysicsDecoupledOutput
+$$
+\mathbf{H}^{(L)} = \text{Temporal}(\text{FFN}(A_{LWR}^{(L-1)} \cdot \mathbf{H}^{(L-1)}))
+$$
 
-```python
-class PhysicsDecoupledOutput(nn.Module):
-    def __init__(self, d_model, pred_len):
-        super().__init__()
-        # 物理骨架预测头
-        self.proj_lwr = nn.Linear(d_model, pred_len)
-        # 残差修正头
-        self.proj_res = nn.Linear(d_model, pred_len)
-        # 初始化：让 pred_lwr 初始预测接近均值
-        nn.init.zeros_(self.proj_lwr.weight)
-        nn.init.zeros_(self.proj_lwr.bias)
+$$
+\vdots
+$$
 
-    def forward(self, H_v):
-        """
-        H_v: (B, N, P, d) v-Stream 最终特征
-        Returns: (pred, pred_lwr, pred_res)
-        """
-        h_v = H_v.mean(dim=2)  # (B, N, d)
-        pred_lwr = self.proj_lwr(h_v)
-        pred_res = self.proj_res(h_v)
-        return pred_lwr + pred_res, pred_lwr, pred_res
-```
+$$
+A_{LWR}^{(l)} = f(v_c, T; q_{obs}, v_{obs})
+$$
 
-### 5.3 残差比监控
+对 $v_c$ 求导（链式法则）：
 
-```python
-pred, pred_lwr, pred_res = output(H_v)
-res_ratio = pred_res.abs().mean() / (pred_lwr.abs().mean() + 1e-6)
+$$
+\frac{\partial v_c}{\partial \mathcal{L}} = \sum_{l=0}^{L-1} \frac{\partial \mathbf{H}^{(L)}}{\partial \mathcal{L}} \cdot \frac{\partial \mathbf{H}^{(L-1)}}{\partial \mathbf{H}^{(L)}} \cdots \frac{\partial \mathbf{H}_{phys}^{(l)}}{\partial A_{LWR}^{(l)}} \cdot \frac{\partial v_c}{\partial A_{LWR}^{(l)}}
+$$
 
-# 预期：
-# - 训练初期 >1.0（物理骨架初始化为0，残差主导）
-# - 训练后期 0.1~0.5（物理骨架稳定）
-# - 如果始终 >2.0，说明物理骨架太弱
-```
+**逐项分析**：
 
----
+| 项 | 表达式 | 是否为零 | 量级估计 |
+|----|--------|---------|----------|
+| $\partial \mathcal{L}/\partial \mathbf{H}^{(L)}$ | 由残差损失决定 | 训练初期非零 | $O(1)$ |
+| $\partial \mathbf{H}^{(l+1)}/\partial \mathbf{H}^{(l)}$ | Temporal + FFN 的 Jacobian | 非零 | $O(1)$ |
+| $\partial \mathbf{H}_{phys}^{(l)}/\partial A_{LWR}^{(l)}$ | $\mathbf{H}^{(l)}$（节点特征） | **非零！** | $\|h\| \sim O(1)$ |
+| $\partial A_{LWR}^{(l)}/\partial v_c$ | $\sigma'(x) \cdot (-T) \cdot \bar{v}$ | **非零！** | $O(T \cdot \bar{v}) \sim O(2)$ |
 
-## 六、可解释监控
+### 6.2 与 Attention 偏置方案的对比
 
-### 6.1 A_kernel 热力图监控
+| 方案 | $\partial h/\partial A$ | 中间衰减 | 最终梯度 |
+|------|-------------------------|----------|----------|
+| Attention 偏置 | $\text{softmax}' \cdot \lambda \cdot (\delta_{ij} - \text{softmax}_j)$ | softmax 自我抵消 | $\sim 10^{-6}$ |
+| LWR 矩阵乘法 | $h_j$（直接） | 无 | $\sim 10^{-1}$ |
 
-```python
-def monitor_A_kernel(A_kernel, A_phys_down, A_phys_up, step):
-    A_k = A_kernel[0].detach().cpu().numpy()
+**关键差异**：
 
-    downstream_mass = (A_k * A_phys_down.cpu().numpy()).sum(axis=1)
-    upstream_mass = (A_k * A_phys_up.cpu().numpy()).sum(axis=1)
+- **Attention 方案**：$A$ 通过 $\log A \to \text{logits} \to \text{softmax}$ 间接影响输出，softmax 的归一化效应使梯度自我抵消
+- **LWR 方案**：$A$ 直接参与矩阵乘法 $\mathbf{H}_{phys} = A \cdot \mathbf{H}$，$\partial \mathbf{H}_{phys}/\partial A = \mathbf{H}$ 是直接、无衰减的
 
-    print(f"[A_kernel] downstream: {downstream_mass.mean():.3f}, "
-          f"upstream: {upstream_mass.mean():.3f}, "
-          f"up/down: {upstream_mass.mean()/(downstream_mass.mean()+1e-6):.3f}")
+### 6.3 多层累加效应
 
-    # 通过标准：
-    # - 早高峰 upstream_mass > downstream_mass（拥堵回溢）
-    # - 平峰时相反
-```
+物理参数 $v_c$ 和 $T$ 在所有层共享。反向传播时，每层贡献一个梯度项：
 
-### 6.2 相态时间分布
+$$
+\frac{\partial v_c}{\partial \mathcal{L}} = \sum_{l=0}^{L-1} g^{(l)}, \quad g^{(l)} \sim O(0.1)
+$$
 
-```python
-def monitor_regime(regime_all, step):
-    free_flow_ratio = (regime_all > 0.5).float().mean().item()
-    print(f"[Regime] Free-flow ratio: {free_flow_ratio:.3f}")
-
-    # 预期：
-    # - 白天 0.3~0.6（有拥堵）
-    # - 夜间 0.8+（全自由流）
-    # - 如果全天都是 0.5，说明 v_critical 设错了
-```
-
-### 6.3 物理参数漂移
-
-```python
-def monitor_physical_param(v_critical, step):
-    v_c = v_critical.item() if hasattr(v_critical, 'item') else v_critical
-    print(f"[PhysParam] v_critical = {v_c:.1f} km/h")
-
-    # 预期：PeMS 数据集应收敛到 25~40 km/h
-    # 如果飞到 100+ 或降到 5-，说明数据/损失有问题
-```
+$L=2$ 层时总梯度 $\sim O(0.2)$，$L=4$ 层时 $\sim O(0.4)$。**多层不是稀释，而是累加。**
 
 ---
 
-## 七、时间层因果掩码
+## 7. 双流设计与显式分解
 
-### 7.1 问题
+### 7.1 双流输入
 
-扩散去噪中，所有 patch 是同时被噪声污染的，去噪时应允许互相看。因果掩码只适合自回归生成（语言模型），不适合扩散。
+| 流 | 输入 | 作用 | 是否参与预测输出 |
+|----|------|------|----------------|
+| q-Stream | $q_{obs}$（真实流量标量） | 计算 $A_{LWR}$ 的流量强度门控 | 否 |
+| v-Stream | $v_{obs}$（真实速度标量）+ $v_{embed}$（速度嵌入） | 相态检测 + 特征传播载体 | 是 |
 
-### 7.2 解决方案
+**设计原则**：q 只决定"图结构"（邻居间权重），不贡献输出特征值；v 在 q 决定的图上传播，产生预测。
 
-```python
-class TemporalAttentionLayer(nn.Module):
-    def __init__(self, ..., use_causal=False):
-        self.use_causal = use_causal
+### 7.2 显式分解输出
 
-    def forward(self, h):
-        # ...
-        if self.use_causal:
-            causal_mask = torch.tril(torch.ones(P, P, device=h.device))
-            attn = attn.masked_fill(causal_mask == 0, -1e9)
-        # 扩散去噪时 use_causal=False（默认）
-```
+$$
+\hat{v} = v_{LWR} + \delta_{pred}
+$$
 
-### 7.3 使用场景
+其中：
 
-| 场景 | use_causal |
-|------|-----------|
-| 扩散去噪器（当前） | False |
-| 条件编码器（处理历史 X） | True |
+- $v_{LWR} = W_{LWR} \cdot \mathbf{H}^{(L)}$：物理骨架预测（可单独提取验证）
+- $\delta_{pred} = W_{res} \cdot \mathbf{H}^{(L)}$：数据驱动残差修正
+
+**监控指标**：
+
+$$
+\rho = \frac{\|\delta_{pred}\|}{\|v_{LWR}\|}
+$$
+
+- 训练初期：$\rho > 1$（物理骨架未收敛，残差主导）
+- 训练后期：$\rho \in [0.1, 0.5]$（物理骨架稳定，残差微调）
+- 若始终 $\rho > 2$：物理约束太弱，需增大 $\log A$ 权重或降低残差分支学习率
 
 ---
 
-## 八、完整训练监控示例
+## 8. 与 DCRNN 的关系
 
-```python
-# 训练循环中
-for step, (x_enc, x_dec, ...) in enumerate(dataloader):
-    # 前向（串行版）
-    pred, pred_lwr, pred_res, all_A_kernel, all_regime = model(
-        q_obs, v_obs, v_embed, A_down, A_up
-    )
+### 8.1 结构对应
 
-    # 监控
-    if step % 100 == 0:
-        monitor_A_kernel(all_A_kernel[-1], A_down, A_up, step)
-        monitor_regime(torch.cat(all_regime), step)
-        monitor_decouple_ratio(pred, pred_lwr, pred_res, step)
-        monitor_physical_param(model.layers[0].pcgk.v_critical, step)
+| DCRNN | LWR-ResDiff | 说明 |
+|-------|-------------|------|
+| 空间：Diffusion Graph Conv | 空间：LWR-Graph Conv | 扩散卷积 → 相态依赖图卷积 |
+| 时间：GRU | 时间：Transformer Attention | RNN → Patch 间自注意力 |
+| 交替：Spatial → Temporal → 下一层 | 交替：LWR-Spatial → Temporal → 下一层 | 完全保留 |
+| 多层堆叠 | 多层堆叠 | 2~4 层 |
 
-    # 损失（可以分别监督 pred_lwr 和 pred_res）
-    loss = criterion(pred, target)
-    # 或分层监督：
-    # loss = criterion(pred, target) + 0.1 * criterion(pred_lwr, target)
+### 8.2 本质区别
+
+DCRNN 的图卷积是**纯数据驱动**的扩散过程，图结构由随机游走定义。LWR-ResDiff 的图卷积是**物理驱动**的守恒过程，图结构由交通流基本图和相态检测定义。
+
+---
+
+## 9. 训练与推理流程
+
+### 9.1 训练流程
+
+```
+输入: batch_x (v_cond), batch_y (v_target), batch_flow_x (q_obs)
+
+1. 归一化 (NI)
+   v_cond_norm = RevIN(v_cond)
+   v_target_norm = RevIN(v_target)
+   q_obs_norm = RevIN(q_obs)
+
+2. 物理基线预测（确定性前向）
+   v_embed = PatchEmbed(v_cond_norm)
+   for l in range(L):
+       A_LWR^(l) = PCGK(q_obs_norm, v_cond_norm, A_down, A_up)
+       H_phys^(l) = A_LWR^(l) @ H^(l)
+       H^(l+1) = Temporal(FFN(H_phys^(l)))
+   v_LWR = OutputProj(H^(L))
+
+3. 真实残差
+   delta_true = v_target_norm - v_LWR
+
+4. 残差加噪
+   t ~ Uniform(0, T)
+   delta_k = sqrt(alpha_bar[t]) * delta_true + sqrt(1 - alpha_bar[t]) * eps
+
+5. 残差注入与去噪预测
+   H^(0) = v_embed + ResEmbed(delta_k)
+   for l in range(L):
+       A_LWR^(l) = PCGK(...)  # 重新计算（状态可能变化）
+       H_phys^(l) = A_LWR^(l) @ H^(l)
+       H^(l+1) = Temporal(FFN(H_phys^(l)))
+   delta_pred = ResOutputProj(H^(L))
+
+6. 损失
+   L = weighted_MAE(delta_pred, delta_true)
+
+7. 反归一化（监控用）
+   v_pred = RevIN.denorm(v_LWR + delta_pred)
+```
+
+### 9.2 推理流程
+
+```
+输入: x_enc (v_cond)
+
+1. 预计算物理基线（只算一次！）
+   v_LWR = LWR-ST-Network(x_enc)
+
+2. 多次采样残差
+   for sample_id in range(n_samples):
+       delta_K = randn(B, N, pred_len)
+       for k in reversed(range(K)):
+           delta_pred = ResDenoiser(delta_k, v_LWR)
+           delta_{k-1} = DPM-Solver(delta_k, delta_pred, k)
+       all_deltas.append(delta_0)
+
+3. MoM 集成
+   delta_final = Median-of-Means(all_deltas)
+
+4. 最终预测
+   v_pred = v_LWR + delta_final
+   v_pred = RevIN.denorm(v_pred)
 ```
 
 ---
 
-## 九、与扩散模型的结合
+## 10. 论文叙事建议
 
-### 5.1 PCGK 模块
+### 10.1 核心贡献（3 点）
+
+1. **Residual Diffusion Space**：首次将扩散模型从原始信号空间转移到物理残差空间，LWR 负责宏观趋势，扩散负责微观不确定性。
+
+2. **LWR-Graph Convolution as Core Operator**：用相态依赖的矩阵乘法替代 Attention 作为空间传播核心，避免物理梯度被 softmax 自我抵消。
+
+3. **Alternating Spatio-Temporal Depth**：保留 DCRNN 的交替时空结构，每层 = LWR-Spatial → Temporal，物理约束嵌入多层传播链。
+
+### 10.2 回应审稿人质疑
+
+**Q: "Why not just use LWR as a standalone predictor?"**
+
+> "LWR is a macroscopic PDE that assumes conservation and smoothness. Real traffic violates these assumptions due to sensor noise, non-conservative on-ramps, and stochastic driver behavior. Our model uses LWR as the deterministic backbone and diffusion as the stochastic corrector, combining the best of both worlds."
+
+**Q: "Does the physical module limit model flexibility?"**
+
+> "The physical module computes a baseline that the residual denoiser can override. If the data strongly violates LWR (e.g., accidents, extreme weather), the residual $\delta$ will be large, and the denoiser will compensate. The model is as flexible as standard diffusion, but with a better inductive bias that accelerates learning."
+
+**Q: "How is this different from adding physical features as input?"**
+
+> "Adding flow/speed as input channels makes the model 'see' physics but not 'obey' physics. In our design, the physical baseline $v_{LWR}$ is computed by a separate deterministic module with its own parameters ($v_c$, $T$), and the neural network is explicitly trained to predict only the residual. This architectural separation ensures physical constraints are hard-coded, not soft-suggested."
+
+---
+
+## 11. 实现要点
+
+### 11.1 核心模块：LWR-Spatial Propagation
 
 ```python
-class PhysicsComputedGraphKernel(nn.Module):
+class LWRGraphConv(nn.Module):
     """
-    PCGK: Physics-Computed Graph Kernel
-
-    物理正确的图核计算：
-    - 输入：真实物理量（q_embed + v_obs）
-    - 相态检测：用速度阈值区分自由流/拥堵流
-    - 图权重：基于相态方向
+    LWR 图卷积：物理矩阵乘法作为核心算子
+    
+    替代 GAT 的 attention，直接用 A_kernel @ H 做空间传播
     """
-
-    def __init__(self, d_model, num_nodes, v_critical=30.0):
+    def __init__(self, d_model):
         super().__init__()
-
-        # v_critical 可学习（用 softplus 保证 > 5 km/h）
-        self.raw_v_critical = nn.Parameter(torch.tensor(v_critical_init - 5.0))
-        self.v_critical_min = 5.0
-
-    @property
-    def v_critical(self):
-        """可学习的临界速度（softplus 保证 > 5 km/h）"""
-        return F.softplus(self.raw_v_critical) + self.v_critical_min
-
-    def compute_regime(self, v_obs):
-        """用速度阈值判断相态（v_critical 可学习）"""
-        regime = (v_obs > self.v_critical).float().mean(dim=-1, keepdim=True)
-        return regime
-
-    def compute_physical_kernel(self, q_obs, regime, A_phys_down, A_phys_up):
-        """基于物理的图核计算（用真实 q_obs）"""
-        # 流量强度相似度（用真实流量标量）
-        q_strength = q_obs.mean(dim=-1, keepdim=True)  # (B, N, 1)
-        intensity_sim = torch.minimum(q_norm, q_norm.transpose(1, 2)) / \
-                        (torch.maximum(q_norm, q_norm.transpose(1, 2)) + 1e-6)
-
-        # 相态方向加权
-        downstream_weight = regime * A_phys_down.unsqueeze(0)
-        upstream_weight = (1 - regime) * A_phys_up.unsqueeze(0)
-        direction_weight = downstream_weight + upstream_weight
-
-        # 合并
-        w_kernel = direction_weight * (0.5 + 0.5 * intensity_sim)
-
-        # 归一化
-        A_mask = (A_phys_down + A_phys_up).clamp(0, 1)
-        w_kernel = w_kernel * A_mask.unsqueeze(0)
-        w_kernel = w_kernel.masked_fill(w_kernel == 0, -1e9)
-        A_kernel = F.softmax(w_kernel, dim=-1) * A_mask.unsqueeze(0)
-
-        return A_kernel
-
-    def forward(self, q_obs, v_obs, A_phys_down, A_phys_up, A_adp=None):
-        regime = self.compute_regime(v_obs)
-        A_kernel = self.compute_physical_kernel(q_obs, regime, A_phys_down, A_phys_up)
-
-        alpha = torch.sigmoid(self.alpha)
-        if A_adp is not None:
-            A_eff = alpha * A_kernel + (1 - alpha) * A_adp.unsqueeze(0)
-        else:
-            A_eff = A_kernel
-
-        return A_eff, regime
+        self.W_phys = nn.Linear(d_model, d_model)  # 物理分支投影
+        self.beta_phys = nn.Parameter(torch.tensor(0.7))  # 物理主导系数
+    
+    def forward(self, h, A_kernel):
+        """
+        h: (B, N, P, d) 特征
+        A_kernel: (B, N, N) 物理图核
+        """
+        B, N, P, d = h.shape
+        
+        # 矩阵乘法：A_kernel @ H
+        # h: (B, N, P, d) -> (B*P, N, d)
+        # A: (B, N, N) -> (B*P, N, N)
+        h_2d = h.permute(0, 2, 1, 3).reshape(B * P, N, d)
+        A_exp = A_kernel.unsqueeze(1).expand(B, P, N, N).reshape(B * P, N, N)
+        
+        h_phys = torch.bmm(A_exp, h_2d)  # (B*P, N, d)
+        h_phys = self.W_phys(h_phys)
+        
+        # reshape back
+        h_phys = h_phys.reshape(B, P, N, d).permute(0, 2, 1, 3)
+        
+        # 组合
+        beta = torch.sigmoid(self.beta_phys)
+        return beta * h_phys + (1 - beta) * h
 ```
 
-### 5.2 空间 GAT 层
+### 11.2 梯度验证
 
 ```python
-class SpatialGATLayer(nn.Module):
-    """空间 GAT - 可学习 log(A) 权重"""
+# 验证 v_critical 的梯度非零
+loss.backward()
 
-    def __init__(self, d_model, n_heads, num_nodes, dropout=0.1):
-        super().__init__()
-        self.W_q = nn.Linear(d_model, d_model)
-        self.W_k = nn.Linear(d_model, d_model)
-        self.W_v = nn.Linear(d_model, d_model)
-        self.W_o = nn.Linear(d_model, d_model)
-
-        # 可学习的 log(A) 权重
-        self.log_A_weight = nn.Parameter(torch.tensor(0.5))
-
-        self.dropout = nn.Dropout(dropout)
-        self.beta = nn.Parameter(torch.zeros(1))
-
-    def forward(self, h, A_graph):
-        # QKV projection
-        q = self.W_q(h)
-        k = self.W_k(h)
-        v = self.W_v(h)
-
-        # Multi-head reshape
-        q = q.view(B, N, P, self.n_heads, self.d_head).transpose(2, 3)
-        k = k.view(B, N, P, self.n_heads, self.d_head).transpose(2, 3)
-        v = v.view(B, N, P, self.n_heads, self.d_head).transpose(2, 3)
-
-        # Attention
-        attn = (q @ k.transpose(-2, -1)) / (self.d_head ** 0.5)
-        attn = attn + torch.sigmoid(self.log_A_weight) * torch.log(A_graph.unsqueeze(1) + 1e-10)
-        attn = F.softmax(attn.masked_fill(A_graph.unsqueeze(1) == 0, -1e9), dim=-1)
-
-        # Aggregate
-        h_out = (attn @ v).transpose(2, 3).reshape(B, N, P, d)
-        h_out = self.W_o(h_out)
-
-        return h_out
-```
-
-### 5.3 物理参数监控
-
-```python
-# 训练时打印监控指标
-print(f"alpha_mix = {model.layers[0].pcgk.alpha_mix.item():.3f}")  # 混合系数
-print(f"log_A_weight = {model.layers[0].spatial_gat.log_A_weight.item():.3f}")
-print(f"Free-flow ratio = {(regime > 0.5).float().mean():.3f}")
+for name, p in model.named_parameters():
+    if 'raw_v_critical' in name:
+        grad_norm = p.grad.norm().item()
+        print(f"[GRAD] {name}: grad_norm={grad_norm:.2e}")
+        assert grad_norm > 1e-6, f"Gradient vanished for {name}!"
 ```
 
 ---
 
-## 九、计算优化
+## 12. 总结
 
-### 9.1 PCGK 缓存策略
+| 维度 | 现有方法（补丁式） | LWR-ResDiff |
+|------|-------------------|-------------|
+| 物理作用 | Attention 偏置项 | 每层矩阵乘法主导 |
+| 梯度路径 | $\partial \text{softmax} \to \partial \log A$（衰减） | $\partial(A \cdot H) = H$（直接） |
+| 扩散目标 | 原始速度（方差大） | 物理残差（方差小） |
+| 时空结构 | 无明确交替 | 保留 DCRNN 模式 |
+| 可解释性 | 弱（权重混合） | 强（$v_{LWR}$ 可单独验证） |
+| 物理参数 | 不可学习 | 可学习且梯度非零 |
 
-在测试推理时，条件历史 `cond_ts` 在整个采样过程中保持不变，因此 PCGK 图核只需要计算一次：
-
-```python
-# Model.forward_val_test() 中：
-# 采样前预计算 PCGK
-self._pcgk_cache = self.nn.precompute_pcgk(x_past_flat)
-
-# 采样循环中复用缓存
-for step in range(s_steps):
-    pred = self.nn(x, t, cond, pcgk_cache=self._pcgk_cache)
-```
-
-**效果**：PCGK 调用次数从 `sample_times × s_steps × n_layers` 减少到 `n_layers`（每层仅 1 次）。
-
-### 9.2 SpatialGAT 向量化
-
-原始实现使用 `for p in range(P)` 循环遍历每个 Patch，导致 12 次小 kernel launch。向量化版本将 Patch 维度 batch 化：
-
-```python
-# 原始版本（有循环）
-for p in range(P):
-    h_p = h[:, :, p, :]
-    q = self.W_q(h_p).view(...)
-    # ... attention ...
-
-# 向量化版本（无循环）
-q = self.W_q(h)  # (B, N, P, d)
-q = q.permute(0, 2, 1, 3).reshape(B * P, N, d)  # (B*P, N, d)
-q = q.view(B * P, N, n_heads, d_head).transpose(1, 2)  # (B*P, H, N, d_h)
-# 一次大 kernel 完成所有 Patch 的注意力计算
-```
-
-**效果**：SpatialGAT 部分 3-5× 加速，整体推理时间减少约 50%。
-
-### 9.3 性能对比
-
-| 优化 | 优化前 | 优化后 | 加速 |
-|------|--------|--------|------|
-| PCGK 缓存 | 40 次/batch | 2 次/batch | ~95% 减少 |
-| SpatialGAT 向量化 | 12 次 kernel/batch | 1 次 kernel/batch | ~50% 整体加速 |
-| 完整测试 (132 batches) | ~100s | ~45s | ~55% |
-
-### 9.4 论文表述建议
-
-> *"While the physics-computed graph kernel introduces additional operations, we note that its computational cost accounts for only ~10% of the total forward pass. Through vectorized implementation of the spatial GAT layer, the overall inference time is reduced by 55% compared to the naive loop-based version, achieving 45.7s for the full test set (132 batches). This confirms that physical interpretability does not come at the expense of computational efficiency."*
-
----
-
-## 十、与扩散模型的结合
-
-$$
-\epsilon_\theta = \text{ST-LWR-GAT}(\mathbf{q}_{embed}, \mathbf{v}_{embed}, \mathbf{v}_{obs}, \mathcal{G})
-$$
-
-**物理意义**：
-- 每一步去噪对应一次**物理守恒律驱动的图上传播**
-- 拥堵波沿物理边传播，方向由相态决定
-- 信息传播由真实物理量引导
-
----
-
-## 十一、与传统方法的对比
-
-| 特性 | 自适应图学习 | ST-LWR-GAT |
-|------|------------|------------|
-| 图核来源 | $\text{softmax}(\mathbf{E}_1 \mathbf{E}_2^T)$ | $f_{regime}(v_{obs})$ |
-| 物理约束 | 无 | 相态方向传播 |
-| 可解释性 | 低 | 高 |
-| 参数意义 | 无 | $v_{critical}$ 有交通意义 |
-| 时空耦合 | 分别处理 | 交替传播 |
-
----
-
-## 十二、论文叙事建议
-
-**核心贡献总结**：
-
-1. **Physics-Computed Graph Kernel**: 图核由真实速度观测的相态检测决定
-2. **物理约束嵌入**: 物理规则嵌入前向计算图，非 loss 软惩罚
-3. **双流分离设计**: q 只贡献图核，v 做特征传播
-
-**Abstract 建议表述**：
-
-> *We propose a physics-computed graph kernel where edge weights are determined by the traffic phase (free-flow/congestion) detected from real velocity observations. Specifically, the edge propagation direction follows the physical conservation law: congestion propagates downstream under free-flow conditions and upstream (spillback) under congestion. The only learned quantities are the embedding projectors and a lightweight phase-dependent weighting — the graph structure is a direct consequence of physical phase detection.*
-
----
-
-## 十三、总结
-
-> ST-LWR-GAT 通过 PCGK 实现物理约束的时空图注意力：
-
-**核心设计**：
-1. **双流独立输入**：q_obs（真实流量标量）+ v_obs（真实速度标量）+ v_embed（速度嵌入）
-2. **PCGK 正确**：用 v_obs 判断相态（v_critical 可学习），用 q_obs 做流量强度门控
-3. **串行传播**：空间 GAT → 时间 Attn（无 Gate！）
-4. **差分更新**：H_out = H_gat + β * (H_temp - H_gat)，时间层只贡献物理骨架的偏差
-5. **显式分解**：pred = pred_lwr + pred_res
-6. **熵检测**：验证 A_kernel 是否退化
-
-**关键改进**：
-- v_critical 可学习（softplus 保证 > 5 km/h）
-- H_out 差分形式，物理骨架更硬
-- PCGK 用真实物理量（q_obs + v_obs）
-- 熵检测防止图核退化
-- 残差分支梯度衰减因子
-
-> 该设计兼具物理可解释性和数据驱动灵活性，为交通流预测提供了坚实的理论基础。
+> **LWR 不是模型的"插件"，而是每层空间传播的"骨架"。扩散不是模型的"主体"，而是"修正器"。交替时空深度完全保留，物理与数据驱动各司其职。**
 
 ---
 
@@ -731,34 +630,25 @@ $$
 | $N$ | 节点数（传感器/路段数） |
 | $P$ | Patch 数（时间序列分块数） |
 | $d$ | 特征维度 |
-| $v_{critical}$ | 临界速度（用于相态判断） |
+| $v_c$ | 临界速度（用于相态判断） |
+| $T$ | 温度系数（sigmoid 平滑度） |
 | $v$ | 速度 |
 | $q$ | 流量 |
 | $\mathbf{H}$ | 特征矩阵 |
-| $\mathbf{A}$ | 邻接矩阵 |
-| $\mathbf{A}_{kernel}$ | 物理图核 |
-| $\mathbf{r}$ | 相态指示（1=自由流，0=拥堵） |
-| $\mathbf{Q}, \mathbf{K}, \mathbf{V}$ | Attention 的 Query, Key, Value |
+| $A_{LWR}$ | LWR 物理图核 |
+| $r$ | 相态指示（1=自由流，0=拥堵） |
+| $\delta$ | 物理残差 |
 | $\sigma(\cdot)$ | Sigmoid 函数 |
 | $\odot$ | Hadamard 积 |
 
 ---
 
-## 附录 B：训练超参数建议
-
-| 参数 | 建议值 | 说明 |
-|------|--------|------|
-| $v_{critical}$ | 25-40 km/h (可学习) | PeMS 城市快速路典型值 |
-| $\alpha_{mix}$ | 0.7 (可学习) | 物理核主导 |
-| $\log(A)$ 权重 | 0.5 (可学习) | 图先验强度 |
-| use_causal | False | 扩散去噪 |
-| PCGK 学习率 | 主学习率 × 1.0 | 无特殊调度 |
-
-## 附录 C：监控通过标准
+## 附录 B：监控通过标准
 
 | 指标 | 预期范围 | 异常诊断 |
-|------|---------|---------|
+|------|---------|----------|
+| $\partial v_c / \partial \mathcal{L}$ | $> 10^{-6}$ | 梯度消失，检查 SpatialGAT 是否改为矩阵乘法 |
 | upstream/downstream 比 | 早高峰 >1, 平峰 <1 | 全 >1 说明拥堵频繁 |
-| Free-flow ratio | 白天 0.3-0.6, 夜间 0.8+ | 全 0.5 说明 v_critical 设错 |
-| \|res\|/\|lwr\| | 训练后期 0.1-0.5 | 始终 >2 说明物理骨架太弱 |
-| v_critical | 25-40 km/h | >80 或 <10 说明数据/损失有问题 |
+| Free-flow ratio | 白天 0.3-0.6, 夜间 0.8+ | 全 0.5 说明 $v_c$ 设错 |
+| $\|\delta\|/\|v_{LWR}\|$ | 训练后期 0.1-0.5 | 始终 >2 说明物理骨架太弱 |
+| $v_c$ | 25-40 km/h | >80 或 <10 说明数据/损失有问题 |

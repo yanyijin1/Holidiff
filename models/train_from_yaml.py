@@ -9,6 +9,7 @@ import os
 import sys
 import random
 import yaml
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -26,6 +27,81 @@ def load_config_from_yaml(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def save_best_params(model, save_dir, setting):
+    """
+    保存模型的最佳物理参数到文件
+    支持 LWRGAT 模型和其他模型
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    save_path = os.path.join(save_dir, f'best_params_{setting}_{timestamp}.txt')
+    
+    params_info = []
+    params_info.append(f"=" * 60)
+    params_info.append(f"Best Physical Parameters - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    params_info.append(f"Setting: {setting}")
+    params_info.append(f"=" * 60)
+    
+    # 尝试获取 LWRGAT 模型的物理参数
+    if hasattr(model, 'nn') and hasattr(model.nn, 'st_layers'):
+        for i, layer in enumerate(model.nn.st_layers):
+            params_info.append(f"\n[STLWRGATLayer {i}]")
+            if hasattr(layer, 'pcgk'):
+                pcgk = layer.pcgk
+                params_info.append(f"  v_critical: {pcgk.v_critical.item():.2f} km/h")
+                if hasattr(pcgk, 'alpha'):
+                    params_info.append(f"  alpha (mix): {pcgk.alpha.item():.4f}")
+                if hasattr(pcgk, 'A_phys_down'):
+                    params_info.append(f"  A_phys_down: shape={pcgk.A_phys_down.shape}")
+            if hasattr(layer, 'spatial_gat'):
+                gat = layer.spatial_gat
+                if hasattr(gat, 'log_A_weight'):
+                    params_info.append(f"  log_A_weight: {gat.log_A_weight.item():.4f}")
+    
+    # 获取总参数量
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    params_info.append(f"\n[Model Stats]")
+    params_info.append(f"  Total params: {total_params:,}")
+    params_info.append(f"  Trainable params: {trainable_params:,}")
+    params_info.append(f"=" * 60)
+    
+    # 保存到文件
+    with open(save_path, 'w') as f:
+        f.write('\n'.join(params_info))
+    
+    # 同时保存为 JSON 格式方便程序读取
+    json_path = save_path.replace('.txt', '.json')
+    import json
+    json_data = {
+        'setting': setting,
+        'timestamp': timestamp,
+        'layers': []
+    }
+    
+    if hasattr(model, 'nn') and hasattr(model.nn, 'st_layers'):
+        for i, layer in enumerate(model.nn.st_layers):
+            layer_data = {'layer_idx': i}
+            if hasattr(layer, 'pcgk'):
+                pcgk = layer.pcgk
+                layer_data['v_critical'] = float(pcgk.v_critical.item())
+                if hasattr(pcgk, 'alpha'):
+                    layer_data['alpha'] = float(pcgk.alpha.item())
+            if hasattr(layer, 'spatial_gat'):
+                gat = layer.spatial_gat
+                if hasattr(gat, 'log_A_weight'):
+                    layer_data['log_A_weight'] = float(gat.log_A_weight.item())
+            json_data['layers'].append(layer_data)
+    
+    with open(json_path, 'w') as f:
+        json.dump(json_data, f, indent=2)
+    
+    print(f"[Best Params] Saved to {save_path}")
+    print(f"[Best Params] JSON saved to {json_path}")
+    
+    return save_path
 
 
 def yaml_to_args(config):
@@ -149,7 +225,9 @@ def yaml_to_args(config):
     switch_cfg = cfg.get('model_switch', config.get('model_switch', {}))
     args.use_stformer = switch_cfg.get('use_stformer', False)
     args.use_lwrgat = switch_cfg.get('use_lwrgat', False)
+    args.use_lwrres = switch_cfg.get('use_lwrres', False)
     args.st_layers = switch_cfg.get('st_layers', 3)
+    args.use_simple_layer = switch_cfg.get('use_simple_layer', False)  # 简化层（快速验证）
     
     return args
 
@@ -159,6 +237,7 @@ def main():
     parser.add_argument('--config', type=str, required=True, help='YAML config file path')
     parser.add_argument('--test_only', action='store_true', help='Only run testing')
     parser.add_argument('--gpu', type=int, default=0, help='GPU id')
+    parser.add_argument('--log_dir', type=str, default='./logs', help='Log directory')
     args_cli = parser.parse_args()
 
     # 加载 YAML 配置
@@ -180,24 +259,89 @@ def main():
 
     args.use_gpu = True if torch.cuda.is_available() else False
 
-    if args_cli.test_only:
-        exp = Exp_Long_Term_Forecast(args)
-        setting = f"{args.task_name}_{args.model_id}_{args.model}_{args.data}_ft{args.features}_sl{args.seq_len}_ll{args.label_len}_pl{args.pred_len}_dm{args.d_model}_nh{args.num_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_eb{args.embed}_{args.des}_0"
-        exp.test(setting, test=1)
-    else:
-        # 训练模式
-        for ii in range(args.itr):
+    # 设置日志目录
+    log_dir = args_cli.log_dir
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 创建日志文件名
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    model_name = args.model_id or 'default'
+    log_file = os.path.join(log_dir, f'train_{model_name}_{timestamp}.log')
+    
+    # 保存最佳参数的目录
+    best_params_dir = os.path.join(log_dir, 'best_params')
+    os.makedirs(best_params_dir, exist_ok=True)
+
+    # 打开日志文件，同时输出到屏幕和文件
+    log_f = open(log_file, 'a', buffering=1)
+    
+    # 保存原始 stdout
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    
+    class Logger:
+        def __init__(self, file, stdout):
+            self.file = file
+            self.stdout = stdout
+        def write(self, msg):
+            self.stdout.write(msg)
+            self.file.write(msg)
+            self.file.flush()
+        def flush(self):
+            self.stdout.flush()
+            self.file.flush()
+    
+    sys.stdout = Logger(log_f, old_stdout)
+    sys.stderr = Logger(log_f, old_stderr)
+
+    try:
+        if args_cli.test_only:
             exp = Exp_Long_Term_Forecast(args)
-            setting = f"{args.task_name}_{args.model_id}_{args.model}_{args.data}_ft{args.features}_sl{args.seq_len}_ll{args.label_len}_pl{args.pred_len}_dm{args.d_model}_nh{args.num_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_eb{args.embed}_{args.des}_{ii}"
+            setting = f"{args.task_name}_{args.model_id}_{args.model}_{args.data}_ft{args.features}_sl{args.seq_len}_ll{args.label_len}_pl{args.pred_len}_dm{args.d_model}_nh{args.num_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_eb{args.embed}_{args.des}_0"
+            
+            print(f"\n{'='*60}")
+            print(f"Test Mode - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*60}\n")
+            
+            exp.test(setting, test=1)
+        else:
+            # 训练模式
+            for ii in range(args.itr):
+                exp = Exp_Long_Term_Forecast(args)
+                setting = f"{args.task_name}_{args.model_id}_{args.model}_{args.data}_ft{args.features}_sl{args.seq_len}_ll{args.label_len}_pl{args.pred_len}_dm{args.d_model}_nh{args.num_heads}_el{args.e_layers}_dl{args.d_layers}_df{args.d_ff}_eb{args.embed}_{args.des}_{ii}"
 
-            print(f'>>>>>>>>start training : {setting}>>>>>>>>>>>>>>>>>>>>>>>>>>')
-            exp.train(setting)
+                print(f"\n{'='*60}")
+                print(f"Training Iteration {ii+1}/{args.itr} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"Setting: {setting}")
+                print(f"{'='*60}\n")
+                
+                model = exp.train(setting)
 
-            print(f'>>>>>>>>testing : {setting}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<')
-            exp.test(setting)
-            torch.cuda.empty_cache()
+                # 训练完成后保存最佳参数
+                save_best_params(model, best_params_dir, setting)
+                
+                print(f"\n{'='*60}")
+                print(f"Testing - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"{'='*60}\n")
+                exp.test(setting)
+                torch.cuda.empty_cache()
+                
+            # 保存最终最佳参数汇总
+            print(f"\n{'='*60}")
+            print(f"All training iterations completed!")
+            print(f"Best params saved to: {best_params_dir}")
+            print(f"Log saved to: {log_file}")
+            print(f"{'='*60}\n")
 
-    print('[Done]')
+        print('[Done]')
+        
+    finally:
+        # 恢复原始 stdout/stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        log_f.close()
+        print(f"\nLog saved to: {log_file}")
+        print(f"Best params saved to: {best_params_dir}")
 
 
 if __name__ == '__main__':

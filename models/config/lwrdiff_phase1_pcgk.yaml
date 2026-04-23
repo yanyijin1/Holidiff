@@ -51,7 +51,7 @@ model_args:
 
 optimization:
   batch_size: 32
-  train_epochs: 2  # 测试用 2 个 epoch
+  train_epochs: 15
   patience: 8
   learning_rate: 0.0005
   loss_type: MAE
