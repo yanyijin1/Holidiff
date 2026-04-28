@@ -152,6 +152,7 @@ def yaml_to_args(config):
     args.output_attention = model_cfg.get('output_attention', False)
     args.skip_dropout = model_cfg.get('skip_dropout', 0.1)
     args.use_tst_layer = model_cfg.get('use_tst_layer', False)
+    args.freq_enabled = model_cfg.get('freq_enabled', False)
 
     # Graph - 空间图结构配置
     graph_cfg = cfg.get('graph', {})

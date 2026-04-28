@@ -82,3 +82,6 @@ mse:0.8704305291175842, mae:0.6675340533256531, rmse:0.9329686760902405, mape:2.
 long_term_forecast_lwrdiff_phase2_dual_head_d96_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm96_nh4_el2_dl1_df384_ebtimeF_LWRRes_dual_head_d96_0  
 mse:0.8898635506629944, mae:0.6817877888679504, rmse:0.9433258175849915, mape:2.3299124240875244, mspe:5991.37646484375
 
+long_term_forecast_lwrdiff_phase2_freq_decomp_LWRdiff_res_custom_ftM_sl96_ll48_pl12_dm64_nh4_el2_dl1_df256_ebtimeF_LWRRes_freq_decomp_three_band_0  
+mse:0.7788159251213074, mae:0.6223995089530945, rmse:0.882505476474762, mape:3.2110273838043213, mspe:6875.50244140625
+

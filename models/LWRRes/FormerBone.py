@@ -1,18 +1,20 @@
 """
-STFormerBone - LWR 物理约束版本 (修正版)
+STFormerBone - LWR 物理约束版本 + 频域分解
 
-架构：Patch Embed → Time Add → [STLWRLayer × n] → Output
+架构：Freq Decompose → Patch Embed (×3) → [STLWRLayer × n] → Fusion → Output
 
-关键修正：
-- 使用 STLWRLayer 替代原 STLWRGATLayer
-- precompute_pcgk 缓存格式改为 ((W_up, W_down), regime)
-- 保持与 Model.py / Trainer 的接口兼容
+关键设计：
+- 频域分解：低频趋势 / 中频周期 / 高频波动
+- 三路独立 embedding，保持各自特性
+- 共享 STLWRLayer（不增加参数）
+- 融合层同步合并三路特征
 """
 
 import torch
 import torch.nn as nn
 from einops import rearrange
 from .stlwr_layer import STLWRLayer
+from .freq_decompose import FreqDecomposer, FreqFusion
 from utils.graph import build_upstream_downstream_adjacency as build_phys_adjacency
 
 
@@ -47,6 +49,7 @@ class STFormerBone(nn.Module):
         self.n_layers = getattr(configs, 'st_layers', 2)
         self.num_heads = configs.num_heads
         self.dropout = configs.dropout
+        self.freq_enabled = getattr(configs, 'freq_enabled', False)
 
         # Patch 数量
         self.patch_num_cond = int((self.seq_len - self.patch_len) / self.stride + 1)
@@ -55,9 +58,30 @@ class STFormerBone(nn.Module):
             self.patch_num_pred = 1
         self.total_patches = self.patch_num_cond + self.patch_num_pred
 
-        # 输入投影
-        self.input_proj = nn.Linear(self.patch_len, self.d_model)
-        self.input_dropout = nn.Dropout(self.dropout)
+        # 频域分解
+        if self.freq_enabled:
+            self.freq_decomposer = FreqDecomposer(
+                seq_len=self.seq_len + self.pred_len,
+                alpha_low=0.1,
+                alpha_mid=0.3
+            )
+            # 三路独立 embedding
+            self.input_proj_low = nn.Linear(self.patch_len, self.d_model)
+            self.input_proj_mid = nn.Linear(self.patch_len, self.d_model)
+            self.input_proj_high = nn.Linear(self.patch_len, self.d_model)
+            # 频带融合层
+            self.freq_fusion = FreqFusion(self.d_model)
+            self.input_dropout = nn.Dropout(self.dropout)
+            # 频域版本的 patch 数从完整序列计算
+            full_patches = int((self.seq_len + self.pred_len - self.patch_len) / self.stride + 1)
+            self.patch_num_cond = int((self.seq_len - self.patch_len) / self.stride + 1)
+            self.patch_num_pred = full_patches - self.patch_num_cond
+            self.output_proj = nn.Linear(self.patch_num_pred * self.d_model, self.pred_len)
+        else:
+            # 原版单路
+            self.input_proj = nn.Linear(self.patch_len, self.d_model)
+            self.input_dropout = nn.Dropout(self.dropout)
+            self.output_proj = nn.Linear(self.patch_num_pred * self.d_model, self.pred_len)
 
         # 时间嵌入
         self.time_embed = TimeEmbedding(self.d_model)
@@ -78,11 +102,9 @@ class STFormerBone(nn.Module):
             for _ in range(self.n_layers)
         ])
 
-        # 输出投影
-        self.output_proj = nn.Linear(self.patch_num_pred * self.d_model, self.pred_len)
-
         total_params = sum(p.numel() for p in self.parameters())
-        print(f"[STFormerBone] params: {total_params:,}")
+        print(f"[STFormerBone] params: {total_params:,} (freq_enabled={self.freq_enabled})")
+        print(f"  patch_num_cond={self.patch_num_cond}, patch_num_pred={self.patch_num_pred}")
 
     def get_physical_params(self):
         """获取 PCGK 物理参数（用于监控）"""
@@ -106,7 +128,11 @@ class STFormerBone(nn.Module):
 
         # Patch Embedding
         cond_patches = cond_ts.unfold(-1, size=self.patch_len, step=self.stride)
-        h = self.input_proj(cond_patches)
+        if self.freq_enabled:
+            # 频域版本：只取低频 embedding
+            h = self.input_proj_low(cond_patches)
+        else:
+            h = self.input_proj(cond_patches)
 
         # 提取 q_obs / v_obs
         q_obs = cond_ts.unfold(-1, size=self.patch_len, step=self.stride).mean(dim=-1)
@@ -134,7 +160,8 @@ class STFormerBone(nn.Module):
             q_obs:      (B*N, seq_len)      流量观测
             v_obs:      (B*N, seq_len)      速度观测
         """
-        B_N, T = x.shape
+        B_N, T_pred = x.shape
+        _, T_cond = cond_ts.shape
         N = self.enc_in
         B = B_N // N
 
@@ -143,13 +170,41 @@ class STFormerBone(nn.Module):
         cond_ts = rearrange(cond_ts, '(b n) t -> b n t', n=N)
         timesteps = rearrange(timesteps, '(b n) -> b n', n=N).unsqueeze(-1)
 
-        # Patch Embedding
-        cond_patches = cond_ts.unfold(-1, size=self.patch_len, step=self.stride)
-        x_patches = x.unfold(-1, size=self.patch_len, step=self.stride)
-        patches = torch.cat([cond_patches, x_patches], dim=-2)
+        if self.freq_enabled:
+            # ========== 频域分解路径 ==========
+            full_ts = torch.cat([cond_ts, x], dim=-1)
+            T_full = full_ts.shape[-1]
 
-        h = self.input_proj(patches)
-        h = self.input_dropout(h)
+            # Reshape for FreqDecomposer: (B, N, T) -> (B*N, T)
+            full_ts_flat = full_ts.reshape(B * N, T_full)
+
+            # 频域分解
+            low_flat, mid_flat, high_flat = self.freq_decomposer(full_ts_flat)
+
+            # Reshape back: (B*N, T) -> (B, N, T)
+            low = low_flat.reshape(B, N, T_full)
+            mid = mid_flat.reshape(B, N, T_full)
+            high = high_flat.reshape(B, N, T_full)
+
+            # Patch Embedding：三路独立
+            low_patches = low.unfold(-1, size=self.patch_len, step=self.stride)
+            mid_patches = mid.unfold(-1, size=self.patch_len, step=self.stride)
+            high_patches = high.unfold(-1, size=self.patch_len, step=self.stride)
+
+            h_low = self.input_proj_low(low_patches)
+            h_mid = self.input_proj_mid(mid_patches)
+            h_high = self.input_proj_high(high_patches)
+
+            # 频带融合
+            h = self.freq_fusion(h_low, h_mid, h_high)
+            h = self.input_dropout(h)
+        else:
+            # ========== 原版单路 ==========
+            cond_patches = cond_ts.unfold(-1, size=self.patch_len, step=self.stride)
+            x_patches = x.unfold(-1, size=self.patch_len, step=self.stride)
+            patches = torch.cat([cond_patches, x_patches], dim=-2)
+            h = self.input_proj(patches)
+            h = self.input_dropout(h)
 
         # Time Embedding（加法注入）
         t_flat = timesteps.reshape(B * N).to(x.device)
