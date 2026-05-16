@@ -5,44 +5,54 @@ __pycache__/
 *.so
 .Python
 *.egg-info/
-dist/
-build/
 .eggs/
+build/
+dist/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# Data outputs
-results/
-test_results/
-checkpoints/
-*.npy
-*.pth
-*.pdf
-*.csv
-*.png
-*.jpg
-*.gif
-
-# Data
-*.csv
-
-# Env
+# Environments
 .env
 .env.local
 venv/
 env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Git / local metadata
+.cursor/
+
+# Baselines and external experiments
+baseline/
+
+# Training artifacts
+**/checkpoints/
+**/results/
+**/test_results/
+**/logs/
+*.log
+*.pth
+*.pt
+
+# Generated analysis / plots
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Data artifacts
+Holidiff/data/
+*.npy
+*.npz
+
+# Misc
+*.tmp
