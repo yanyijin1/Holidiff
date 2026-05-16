@@ -1,0 +1,7 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://roieee-api.top",
+    "ANTHROPIC_AUTH_TOKEN": "sk-GEu4WzIu7PbfUpuPRfuysxP9tdaadS4sfNKlcVLaiFFrccZs",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0"
+  }
+}

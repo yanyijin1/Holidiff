@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from functools import partial
 import torch.nn as nn
-from Holidiff.micro.diffusion import PatchUVIT
+from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
 from Holidiff.utils.diffusion_utils import *
 from Holidiff.layers.RevIN import RevIN
@@ -24,10 +24,10 @@ def cosine_beta_schedule(timesteps, s=5):
     return np.clip(betas, 0, 0.999)
 
 
-class Model(nn.Module):
+class HATEK(nn.Module):
     
     def __init__(self, configs):
-        super(Model, self).__init__()
+        super(HATEK, self).__init__()
 
         self.configs = configs
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -41,7 +41,7 @@ class Model(nn.Module):
         self.num_heads=configs.num_heads
         self.rmom_n = configs.rmom
         self.n_blocks = configs.n_b
-        u_net = PatchUVIT(configs)
+        self.tek = TEK(configs)
             
         self.enc_in = configs.enc_in
         self.batch_size =configs.batch_size
@@ -50,26 +50,27 @@ class Model(nn.Module):
         self.beta_schedule = 'cosine'
         self.v_posterior = 0.0
         self.loss_type = "l1"
-        self.set_new_noise_schedule(None, self.beta_schedule, self.diff_steps, self.beta_start, self.beta_end)
+        self.set_micro_uncertainty_schedule(None, self.beta_schedule, self.diff_steps, self.beta_start, self.beta_end)
         self.total_N = len(self.alphas_cumprod)
         self.T = 1.
         self.eps = 1e-5
-        self.nn = u_net
+        self.nn = self.tek
         self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
-        self.revin_layer = RevIN(self.enc_in, affine=True, subtract_last=False)
+        self.nda_layer = RevIN(self.enc_in, affine=True, subtract_last=False)
+        self.reset_diagnostics()
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
         if self.training:
-            return self.forward_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
+            return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                              enc_self_mask, dec_self_mask, dec_enc_mask)
         else:
-            return self.forward_val_test(x_enc, x_mark_enc, x_dec, x_mark_dec,
+            return self.forward_consensus_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                             enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
 
 
-    def forward_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
+    def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
 
         #print(np.shape(x_enc),np.shape(x_mark_enc)) # (B,L,N)
@@ -81,7 +82,7 @@ class Model(nn.Module):
         x=x[:,f_dim:,:]
         cond_ts = x_enc#(B,L,N)
         if self.configs.new_norm:
-            cond_ts = self.revin_layer(cond_ts,'norm')
+            cond_ts = self.nda_layer(cond_ts,'norm')
             cond_ts = cond_ts.permute(0,2,1) #(B,N,L)
             lenth = np.shape(x)[1] 
             mean_ = torch.mean(x[:,-lenth:,:], dim=1).unsqueeze(1)
@@ -98,11 +99,11 @@ class Model(nn.Module):
             t = torch.cat([t, self.num_timesteps-1-t], dim=0)
             #print(t,t.shape)
             noise = torch.randn_like(x)
-            x_k = self.noise_ts(x_start=x, t=t, noise=noise)
+            x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
             model_out= self.nn(x_k, t, cond_ts,x_mark_enc)
             model_out=torch.reshape(model_out,(B,N,target_len))
             model_out = model_out.permute(0,2,1) #(B,TARGET L,N)
-            model_out=self.revin_layer(model_out,'denorm')
+            model_out=self.nda_layer(model_out,'denorm')
             model_out = model_out.permute(0,2,1)  #(B,N,TARGET L)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
         else:
@@ -122,14 +123,14 @@ class Model(nn.Module):
             t = torch.cat([t, self.num_timesteps-1-t], dim=0)
             #print(t,t.shape)
             noise = torch.randn_like(x)
-            x_k = self.noise_ts(x_start=x, t=t, noise=noise)
+            x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
             model_out = self.nn(x_k, t, cond_ts,x_mark_enc)
             model_out = torch.reshape(model_out,(B,N,target_len))
             model_out = model_out*(std_+0.00001) + mean_#(B,N,TARGET L)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
         return model_out,weight_tmp
 
-    def forward_val_test(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
+    def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
 
         x_future = x_dec[:,-self.configs.pred_len:,:].permute(0,2,1)
@@ -145,7 +146,7 @@ class Model(nn.Module):
         N = self.configs.enc_in
         if self.configs.new_norm:
             x_past = x_past.permute(0,2,1) #(B,L,N)
-            x_past = self.revin_layer(x_past,'norm')
+            x_past = self.nda_layer(x_past,'norm')
             x_past = x_past.permute(0,2,1) #(B,N,L)
         else:
             mean_ = torch.mean(x_past, dim=-1,keepdims=True)
@@ -168,20 +169,20 @@ class Model(nn.Module):
             diff_samples=torch.reshape(diff_samples,(B,N,-1))      
             if self.configs.new_norm:                       
                 diff_samples = diff_samples.permute(0,2,1).to(self.device) #(B,TARGET L,N)
-                diff_samples = self.revin_layer(diff_samples,'denorm')
+                diff_samples = self.nda_layer(diff_samples,'denorm')
             else:
                 diff_samples = diff_samples.to(self.device)*(std_+0.00001) + mean_
                 diff_samples = diff_samples.permute(0,2,1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
         if self.configs.use_mom and sample_times>1:
-                outs = self._rob_median_of_means(all_outs)
+                outs = self.extract_consensus(all_outs)
         else:
                 outs = all_outs.mean(0)
         
         return outs,all_outs.permute(1,0,2,3)
 
-    def set_new_noise_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
+    def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
     ):  
 
         betas = cosine_beta_schedule(diff_steps,self.configs.coss)
@@ -223,39 +224,97 @@ class Model(nn.Module):
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
         assert not torch.isnan(self.lvlb_weights).all() 
 
-    def noise_ts(self, x_start, t, noise=None):
+    def generate_micro_realization(self, x_start, t, noise=None):
 
         noise = default(noise, lambda: self.scaling_noise * torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
     
-    def _emp_mean(self, seq):
+    def _consensus_mean(self, seq):
         return torch.sum(seq, dim=0) / seq.size(0)
 
-    def _median_of_means(self, tensor):
+    def reset_diagnostics(self):
+        self._diag_block_var = []
+        self._diag_inter_dev = []
+        self._diag_median_bias = []
+        self._diag_block_var_map = []
+        self._diag_inter_dev_map = []
+        self._diag_mean_pred = []
+        self._diag_median_pred = []
+
+    def _consensus_reduce(self, tensor):
         if self.n_blocks > tensor.size(0):
             self.n_blocks = int(torch.ceil(tensor.size(0) / 2))
 
         indic = torch.randperm(tensor.size(0))
-        tensor = tensor[indic]  # Shuffle the tensor according to indic
+        tensor = tensor[indic]
         block_size = tensor.size(0) // self.n_blocks
 
         means = []
+        block_var_maps = []
+        block_var_scalars = []
         for i in range(self.n_blocks):
             start_index = i * block_size
-            end_index = start_index + block_size if (i+1) < self.n_blocks else tensor.size(0)
+            end_index = start_index + block_size if (i + 1) < self.n_blocks else tensor.size(0)
             block = tensor[start_index:end_index]
-            block_mean = self._emp_mean(block)
+            block_mean = self._consensus_mean(block)
             means.append(block_mean)
+            block_var = torch.var(block, dim=0, unbiased=False)
+            block_var_maps.append(block_var)
+            block_var_scalars.append(block_var.mean(dim=[1, 2]))
 
         means = torch.stack(means)
-        return torch.median(means, dim=0)[0]
+        means_mean = means.mean(dim=0)
+        inter_dev_map = torch.mean((means - means_mean.unsqueeze(0)) ** 2, dim=0)
+        median_pred = torch.median(means, dim=0)[0]
+        median_bias = torch.abs(median_pred - means_mean).mean(dim=[1, 2])
 
-    def _rob_median_of_means(self, outputs):
+        block_var_map_mean = torch.stack(block_var_maps, dim=0).mean(dim=0)
+        block_var_scalar_mean = torch.stack(block_var_scalars, dim=0).mean(dim=0)
+        inter_dev_scalar = inter_dev_map.mean(dim=[1, 2])
+
+        self._diag_block_var.append(block_var_scalar_mean.detach().cpu())
+        self._diag_inter_dev.append(inter_dev_scalar.detach().cpu())
+        self._diag_median_bias.append(median_bias.detach().cpu())
+        self._diag_block_var_map.append(block_var_map_mean.detach().cpu())
+        self._diag_inter_dev_map.append(inter_dev_map.detach().cpu())
+        self._diag_mean_pred.append(means_mean.detach().cpu())
+        self._diag_median_pred.append(median_pred.detach().cpu())
+
+        return median_pred
+
+    def extract_consensus(self, outputs):
         results = []
+        start_idx = len(self._diag_block_var)
         for _ in range(self.rmom_n):
             shuffled_outputs = outputs[torch.randperm(outputs.size(0))]
-            result = self._median_of_means(shuffled_outputs)
+            result = self._consensus_reduce(shuffled_outputs)
             results.append(result)
         results = torch.stack(results)
-        return self._emp_mean(results)
+
+        recent_block_var = self._diag_block_var[start_idx:]
+        recent_inter_dev = self._diag_inter_dev[start_idx:]
+        recent_median_bias = self._diag_median_bias[start_idx:]
+        recent_block_var_map = self._diag_block_var_map[start_idx:]
+        recent_inter_dev_map = self._diag_inter_dev_map[start_idx:]
+        recent_mean_pred = self._diag_mean_pred[start_idx:]
+        recent_median_pred = self._diag_median_pred[start_idx:]
+
+        self._diag_block_var = self._diag_block_var[:start_idx]
+        self._diag_inter_dev = self._diag_inter_dev[:start_idx]
+        self._diag_median_bias = self._diag_median_bias[:start_idx]
+        self._diag_block_var_map = self._diag_block_var_map[:start_idx]
+        self._diag_inter_dev_map = self._diag_inter_dev_map[:start_idx]
+        self._diag_mean_pred = self._diag_mean_pred[:start_idx]
+        self._diag_median_pred = self._diag_median_pred[:start_idx]
+
+        if recent_block_var:
+            self._diag_block_var.append(torch.stack(recent_block_var, dim=0).mean(dim=0))
+            self._diag_inter_dev.append(torch.stack(recent_inter_dev, dim=0).mean(dim=0))
+            self._diag_median_bias.append(torch.stack(recent_median_bias, dim=0).mean(dim=0))
+            self._diag_block_var_map.append(torch.stack(recent_block_var_map, dim=0).mean(dim=0))
+            self._diag_inter_dev_map.append(torch.stack(recent_inter_dev_map, dim=0).mean(dim=0))
+            self._diag_mean_pred.append(torch.stack(recent_mean_pred, dim=0).mean(dim=0))
+            self._diag_median_pred.append(torch.stack(recent_median_pred, dim=0).mean(dim=0))
+        return self._consensus_mean(results)
+

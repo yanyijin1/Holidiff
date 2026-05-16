@@ -5,7 +5,7 @@ from einops import rearrange
 from Holidiff.layers.rotaryembedding import RotaryEmbedding
 
 
-class Transpose(nn.Module):
+class TensorTranspose(nn.Module):
     def __init__(self, *dims, contiguous=False):
         super().__init__()
         self.dims, self.contiguous = dims, contiguous
@@ -16,7 +16,7 @@ class Transpose(nn.Module):
         return x.transpose(*self.dims)
 
 
-class Attenion(nn.Module):
+class TCPAttention(nn.Module):
     def __init__(self, config, over_hidden=False, trianable_smooth=False, untoken=False, *configs, **kwargs):
         super().__init__()
         self.over_hidden = over_hidden
@@ -28,8 +28,8 @@ class Attenion(nn.Module):
         self.head_dim = config.d_model // config.num_heads
         self.dropout_mlp = nn.Dropout(config.dropout)
         self.mlp = nn.Linear(config.d_model, config.d_model)
-        self.norm_post1 = nn.Sequential(Transpose(1, 2), nn.BatchNorm1d(config.d_model), Transpose(1, 2))
-        self.norm_attn = nn.Sequential(Transpose(1, 2), nn.BatchNorm1d(config.d_model), Transpose(1, 2))
+        self.norm_post1 = nn.Sequential(TensorTranspose(1, 2), nn.BatchNorm1d(config.d_model), TensorTranspose(1, 2))
+        self.norm_attn = nn.Sequential(TensorTranspose(1, 2), nn.BatchNorm1d(config.d_model), TensorTranspose(1, 2))
         self.ff_1 = nn.Sequential(
             nn.Linear(config.d_model, config.d_ff, bias=True),
             nn.GELU(),
@@ -56,7 +56,7 @@ class Attenion(nn.Module):
         return src
 
 
-class FormerBone(nn.Module):
+class STEKBackbone(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.patch_len = configs.patch_len
@@ -72,50 +72,50 @@ class FormerBone(nn.Module):
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
         self.W_outs = nn.Linear((patch_num + 1 + patch_num_forecast) * configs.d_model, configs.pred_len)
-        self.Attentions_over_token = nn.ModuleList([Attenion(configs) for _ in range(configs.e_layers)])
-        self.Attentions_over_token_mid = Attenion(configs)
-        self.Attentions_over_token_up = nn.ModuleList([Attenion(configs) for _ in range(configs.e_layers)])
+        self.Attentions_over_token = nn.ModuleList([TCPAttention(configs) for _ in range(configs.e_layers)])
+        self.Attentions_over_token_mid = TCPAttention(configs)
+        self.Attentions_over_token_up = nn.ModuleList([TCPAttention(configs) for _ in range(configs.e_layers)])
         self.Attentions_mlp = nn.ModuleList([nn.Linear(configs.d_model * 2, configs.d_model) for _ in range(configs.e_layers)])
         self.Attentions_dropout = nn.ModuleList([nn.Dropout(configs.skip_dropout) for _ in range(configs.e_layers)])
         self.Attentions_dropout_mid = nn.Dropout(configs.skip_dropout)
         self.Attentions_dropout_up = nn.ModuleList([nn.Dropout(configs.skip_dropout) for _ in range(configs.e_layers)])
         self.Attentions_norm = nn.ModuleList([
-            nn.Sequential(Transpose(1, 2), nn.BatchNorm1d(configs.d_model), Transpose(1, 2))
+            nn.Sequential(TensorTranspose(1, 2), nn.BatchNorm1d(configs.d_model), TensorTranspose(1, 2))
             for _ in range(configs.e_layers)
         ])
 
-    def forward(self, x, timesteps, cond_ts, x_mark_enc=None):
-        b, c, s = x.shape
-        if cond_ts.shape[-1] < self.patch_len:
-            cond_ts = torch.nn.functional.pad(cond_ts, (0, self.patch_len - cond_ts.shape[-1]), mode='replicate')
-        if x.shape[-1] < self.patch_len:
-            x = torch.nn.functional.pad(x, (0, self.patch_len - x.shape[-1]), mode='replicate')
-        zcube0 = cond_ts.unfold(dimension=-1, size=self.patch_len, step=self.stride)
-        zcube1 = x.unfold(dimension=-1, size=self.patch_len, step=self.stride)
-        zcube = torch.cat([zcube0, zcube1], dim=-2)
-        z_embed = self.input_dropout(self.W_input_projection(zcube))
+    def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None):
+        b, c, s = micro_realization.shape
+        if hist_macro_state.shape[-1] < self.patch_len:
+            hist_macro_state = torch.nn.functional.pad(hist_macro_state, (0, self.patch_len - hist_macro_state.shape[-1]), mode='replicate')
+        if micro_realization.shape[-1] < self.patch_len:
+            micro_realization = torch.nn.functional.pad(micro_realization, (0, self.patch_len - micro_realization.shape[-1]), mode='replicate')
+        hist_tokens = hist_macro_state.unfold(dimension=-1, size=self.patch_len, step=self.stride)
+        future_tokens = micro_realization.unfold(dimension=-1, size=self.patch_len, step=self.stride)
+        state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
+        state_embeddings = self.input_dropout(self.W_input_projection(state_tokens))
         time_token = self.cls(timesteps.float())
-        z_embed = torch.cat((time_token, z_embed), dim=-2)
-        inputs = z_embed
+        state_embeddings = torch.cat((time_token, state_embeddings), dim=-2)
+        inputs = state_embeddings
         b, c, t, h = inputs.shape
         skip = []
-        for a_2, mlp, drop, norm in zip(self.Attentions_over_token, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
-            output = a_2(inputs)
-            inputs = drop(output)
+        for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
+            output = attention_layer(inputs)
+            inputs = dropout_layer(output)
             skip.append(inputs)
         inputs = self.Attentions_over_token_mid(inputs)
         inputs = self.Attentions_dropout_mid(inputs)
-        for a_2, mlp, drop, norm in zip(self.Attentions_over_token_up, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
+        for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token_up, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
             prev = skip.pop()
-            outputs = drop(mlp(torch.cat((prev, inputs), dim=-1)))
+            outputs = dropout_layer(mlp(torch.cat((prev, inputs), dim=-1)))
             outputs = norm(outputs.reshape(b * c, t, -1)).reshape(b, c, t, -1)
-            output = a_2(inputs)
-            inputs = drop(output)
+            output = attention_layer(inputs)
+            inputs = dropout_layer(output)
         flat = inputs[:, :, :, :].reshape(b, c, -1)
         target_in = self.W_outs.in_features
         if flat.shape[-1] > target_in:
             flat = flat[..., :target_in]
         elif flat.shape[-1] < target_in:
             flat = torch.nn.functional.pad(flat, (0, target_in - flat.shape[-1]))
-        z_out = self.W_outs(flat).reshape(b * c, -1)
-        return z_out
+        micro_estimate = self.W_outs(flat).reshape(b * c, -1)
+        return micro_estimate

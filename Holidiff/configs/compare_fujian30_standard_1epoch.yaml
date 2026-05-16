@@ -1,7 +1,7 @@
 task_name: long_term_forecast
 is_training: 1
 model_id: Fujian30_96_12
-model: SimDiff
+model: HATEK
 
 data: fujian30
 root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30

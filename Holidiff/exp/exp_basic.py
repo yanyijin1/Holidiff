@@ -1,13 +1,13 @@
 import os
 import torch
-from Holidiff.HoliDiff import Model as SimDiff
+from Holidiff.HoliDiff import HATEK
 
 
 class Exp_Basic(object):
     def __init__(self, args):
         self.args = args
         self.model_dict = {
-            'SimDiff': SimDiff,
+            'HATEK': HATEK,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)
@@ -18,8 +18,7 @@ class Exp_Basic(object):
 
     def _acquire_device(self):
         if self.args.use_gpu:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(
-                self.args.gpu) if not self.args.use_multi_gpu else self.args.devices
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(self.args.gpu) if not self.args.use_multi_gpu else self.args.devices
             device = torch.device('cuda:{}'.format(self.args.gpu))
             print('Use GPU: cuda:{}'.format(self.args.gpu))
         else:
