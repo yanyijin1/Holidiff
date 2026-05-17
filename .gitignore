@@ -49,10 +49,21 @@ baseline/
 *.jpeg
 *.gif
 
+# Diagnosis generated artifacts
+# keep source code under diagnosis/, ignore generated outputs/figures/cache
+**/diagnosis/**/figures/
+**/diagnosis/**/output/
+**/diagnosis/**/cache/
+**/diagnosis/**/*.json
+**/diagnosis/**/*.csv
+
 # Data artifacts
 Holidiff/data/
 *.npy
 *.npz
+*.pkl
+*.pickle
 
 # Misc
 *.tmp
+*.cache
