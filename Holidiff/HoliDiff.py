@@ -31,7 +31,7 @@ class HATEK(nn.Module):
         super(HATEK, self).__init__()
 
         self.configs = configs
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(f'cuda:{configs.gpu}' if torch.cuda.is_available() and getattr(configs, 'use_gpu', False) else 'cpu')
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.diff_steps = configs.diff_steps
@@ -104,10 +104,10 @@ class HATEK(nn.Module):
             x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
             model_out= self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
             model_out=torch.reshape(model_out,(B,N,target_len))
-            model_out = model_out.permute(0,2,1) #(B,TARGET L,N)
+            model_out = model_out.permute(0,2,1)
             model_out=self.nda_layer(model_out,'denorm')
             model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
-            model_out = model_out.permute(0,2,1)  #(B,N,TARGET L)
+            model_out = model_out.permute(0,2,1)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
         else:
             cond_ts = cond_ts.permute(0,2,1) #(B,N,L) 
@@ -129,7 +129,7 @@ class HATEK(nn.Module):
             x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
             model_out = self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
             model_out = torch.reshape(model_out,(B,N,target_len))
-            model_out = model_out*(std_+0.00001) + mean_#(B,N,TARGET L)
+            model_out = model_out*(std_+0.00001) + mean_
             model_out = model_out.permute(0,2,1)
             model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             model_out = model_out.permute(0,2,1)
@@ -139,6 +139,7 @@ class HATEK(nn.Module):
     def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
 
+        history_for_trend = x_enc  # (B, T_hist, N) 原始尺度，供趋势感知聚合使用
         x_future = x_dec[:,-self.configs.pred_len:,:].permute(0,2,1)
         x_past = x_enc.permute(0,2,1)     
         f_dim = -1 if self.configs.features in ['MS'] else 0
@@ -175,8 +176,8 @@ class HATEK(nn.Module):
                                              eta=0.,
                                              x_T=start_code)
             diff_samples=torch.reshape(diff_samples,(B,N,-1))      
-            if self.configs.new_norm:                       
-                diff_samples = diff_samples.permute(0,2,1).to(self.device) #(B,TARGET L,N)
+            if self.configs.new_norm:
+                diff_samples = diff_samples.permute(0,2,1).to(self.device)
                 diff_samples = self.nda_layer(diff_samples,'denorm')
             else:
                 diff_samples = diff_samples.to(self.device)*(std_+0.00001) + mean_
@@ -319,13 +320,5 @@ class HATEK(nn.Module):
         self._diag_mean_pred = self._diag_mean_pred[:start_idx]
         self._diag_median_pred = self._diag_median_pred[:start_idx]
 
-        if recent_block_var:
-            self._diag_block_var.append(torch.stack(recent_block_var, dim=0).mean(dim=0))
-            self._diag_inter_dev.append(torch.stack(recent_inter_dev, dim=0).mean(dim=0))
-            self._diag_median_bias.append(torch.stack(recent_median_bias, dim=0).mean(dim=0))
-            self._diag_block_var_map.append(torch.stack(recent_block_var_map, dim=0).mean(dim=0))
-            self._diag_inter_dev_map.append(torch.stack(recent_inter_dev_map, dim=0).mean(dim=0))
-            self._diag_mean_pred.append(torch.stack(recent_mean_pred, dim=0).mean(dim=0))
-            self._diag_median_pred.append(torch.stack(recent_median_pred, dim=0).mean(dim=0))
-        return self._consensus_mean(results)
+        return torch.median(results, dim=0)[0]
 

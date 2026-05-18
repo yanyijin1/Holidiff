@@ -1,7 +1,7 @@
 # Current Model Summary for Paper
 
 > 目标：整理当前保留模型，突出可写入论文的公式、模块与物理含义。  
-> 当前保留设置：**Adaptive Historical Trend Residual（init = 0.5）**，其总 MAE 从 0.2296 下降到 0.2281。
+> 当前保留设置：**Trend-Aware PatchEmbed (concat) + fixed Historical Trend Residual (\(\eta=0.5\))**，其总 MAE 从 0.2296 下降到 0.2276。
 
 ---
 
@@ -49,15 +49,22 @@ T^{\mathrm{fut}} = \mathrm{Unfold}(X^{\mathrm{fut}}; P, S).
 T = [T^{\mathrm{hist}}; T^{\mathrm{fut}}].
 \]
 
-每个 patch 通过线性映射投影到隐空间：
+当前保留的输入编码不是原始单通道 patch projection，而是 **Trend-Aware PatchEmbed (concat)**。对每个 patch，额外提取局部线性斜率：
 \[
-Z = W_{\mathrm{in}} T + b_{\mathrm{in}}.
+\tau^{(i)} = \frac{x_{(i+1)P-1} - x_{iP}}{P-1}.
+\]
+
+然后将原 patch 值与趋势斜率拼接后投影：
+\[
+Z = W_{\mathrm{concat}} [T; \tau] + b_{\mathrm{concat}}.
 \]
 
 同时加入时间 token：
 \[
 Z^{(0)} = [z_t; Z].
 \]
+
+这样做的核心目的，是让模型不仅看到某一段“数值高低”，也能看到该 patch 内部“正在上升还是下降”，从而缓解局部激波被均值化后的趋势湮灭。
 
 ---
 
@@ -107,65 +114,57 @@ s^{\mathrm{hist}}_{b,n} = \frac{X^{\mathrm{hist}}_{b,L,n} - X^{\mathrm{hist}}_{b
 
 ---
 
-## 5. Adaptive Eta Parameterization
+## 5. Fixed Eta Parameterization
 
-不同交通状态对趋势外推的需求并不一致：自由流稳态通常只需很弱校正，而拥堵形成或强波动阶段往往需要更强的趋势延续。因此，校正强度不再设为全局常数，而是由当前历史状态自适应决定。
+为了保持趋势残差校正的结构简单且稳定，当前模型不再对 \(\eta\) 进行额外学习，而是将其定义为一个固定标量参数。于是，趋势校正模块可写为：
 
-当前保留方案为样本/节点级自适应校正系数：
 \[
-\eta_{b,n} = g_{\phi} \big(
-|s^{\mathrm{hist}}_{b,n}|,
-\sigma^{\mathrm{hist}}_{b,n},
-\ell^{\mathrm{hist}}_{b,n}
-\big).
+\mathcal{R}_{\eta}(s^{\mathrm{hist}}, h) = \eta \cdot s^{\mathrm{hist}} \cdot h,
+\qquad \eta \in \mathbb{R}_{+}.
 \]
 
-其中 \(g_{\phi}\) 是一个两层 MLP：
+在最终保留模型中，\(\eta\) 取常数：
 \[
-g_{\phi}(u) = \eta_{\max} \cdot \sigma\Big(W_2 \, \mathrm{ReLU}(W_1 u + b_1) + b_2\Big),
-\]
-其中：
-- \(u \in \mathbb{R}^{3}\)
-- \(\sigma(\cdot)\) 为 sigmoid
-- \(\eta_{\max}\) 为最大校正强度
-
-因此
-\[
-\eta_{b,n} \in [0, \eta_{\max}].
+\eta = 0.5.
 \]
 
-当前实现中：
-- hidden dim = 16
-- 输入维度 = 3
-- 输出经 sigmoid 后映射到 \([0, \eta_{\max}]\)
+因此，相比自适应参数化，这里保留的是一个**固定系数的趋势外推算子**。它不引入新的学习参数，也不改变主干网络结构，只通过一个显式常数控制历史趋势向未来的传播强度。
+
+从模型角度看，这一设定的好处是：
+- 保持结构最小化；
+- 保持校正项可解释；
+- 避免额外自由度干扰主干生成器。
 
 ---
 
 ## 6. Residual Correction Formula
 
-有了自适应 \(\eta\) 后，模型就可以将历史趋势转化为未来预测中的显式补偿项。该补偿项沿预测 horizon 线性累积，对交通流中的持续上升或持续回落过程尤其有效。
-
-对未来第 \(h\) 个预测步，残差校正写为：
+在固定 \(\eta\) 的设定下，历史趋势残差校正的定义非常直接。对未来第 \(h\) 个预测步，校正项写为：
 \[
-\Delta X_{b,h,n} = \eta_{b,n} \cdot s^{\mathrm{hist}}_{b,n} \cdot h.
+\Delta X_{b,h,n} = \mathcal{R}_{\eta}(s^{\mathrm{hist}}_{b,n}, h) = \eta \cdot s^{\mathrm{hist}}_{b,n} \cdot h.
 \]
 
 因此最终预测为：
 \[
-\hat{X}^{\mathrm{corr}}_{b,h,n} = \hat{X}^{0}_{b,h,n} + \eta_{b,n} \cdot s^{\mathrm{hist}}_{b,n} \cdot h.
+\hat{X}^{\mathrm{corr}}_{b,h,n} = \hat{X}^{0}_{b,h,n} + \mathcal{R}_{\eta}(s^{\mathrm{hist}}_{b,n}, h).
+\]
+
+代入固定系数形式，可得：
+\[
+\hat{X}^{\mathrm{corr}}_{b,h,n} = \hat{X}^{0}_{b,h,n} + \eta \cdot s^{\mathrm{hist}}_{b,n} \cdot h,
+\qquad \eta = 0.5.
 \]
 
 矩阵形式写为：
 \[
-\hat{X}^{\mathrm{corr}} = \hat{X}^{0} + \eta \odot s^{\mathrm{hist}} \odot \tau,
+\hat{X}^{\mathrm{corr}} = \hat{X}^{0} + \eta \cdot s^{\mathrm{hist}} \odot \tau,
 \]
 其中：
-- \(\eta \in \mathbb{R}^{B \times N}\)
 - \(s^{\mathrm{hist}} \in \mathbb{R}^{B \times N}\)
 - \(\tau = [1,2,\dots,H] \in \mathbb{R}^{H}\)
 - \(\odot\) 表示 broadcast 后的逐元素乘法
 
-这本质上是一个**节点级、样本级、一阶趋势外推修正项**。
+该模块本质上对应一个**固定参数的一阶趋势延续算子**，用显式外推项补偿扩散模型的保守估计。
 
 ---
 
@@ -177,41 +176,65 @@ g_{\phi}(u) = \eta_{\max} \cdot \sigma\Big(W_2 \, \mathrm{ReLU}(W_1 u + b_1) + b
 
 - 若历史斜率 \(s^{\mathrm{hist}} > 0\)，则说明局部交通流处于上升趋势；
 - 若 \(s^{\mathrm{hist}} < 0\)，则说明局部交通流处于下降趋势；
-- \(\eta\) 决定这种趋势延续应被强化到何种程度。
+- 固定的 \(\eta=0.5\) 决定这种趋势延续被补偿到何种程度。
 
-因此：
-\[
-\eta \approx 0
-\]
-表示几乎不校正；而
-\[
-\eta \gg 0
-\]
-表示对趋势延续进行显式外推。
-
-在交通场景下，这意味着：
-- 自由流稳态样本应学习到较小 \(\eta\)
-- 拥堵形成/消散样本应学习到较大 \(\eta\)
+因此，该方案不是让模型额外学习一个复杂校正器，而是通过一个稳定的一阶外推系数，在不破坏主干生成结构的前提下，对拥堵相峰值低估做适度补偿。
 
 ---
 
 ## 8. Why This Module Is Kept
 
-对于当前模型阶段，我们需要保留的是一种既有效、又容易解释、同时改动足够小的增强方式。Adaptive historical trend residual 满足这三个条件，因此适合作为当前版本的保留模块。
+对于当前模型阶段，我们需要保留的是一种既有效、又容易解释、同时改动足够小的增强方式。Trend-Aware PatchEmbed (concat) 与 fixed historical trend residual 满足这三个条件，因此适合作为当前版本的保留模块。
 
 保留该模块的原因是：
 
 1. **不改动主干生成器结构**  
-   仅在输出层后增加显式物理校正，代价小。
+   仅在输入编码与输出层后增加显式趋势信息和物理校正，代价小。
 
 2. **直接针对系统性低估问题**  
-   若 Denoiser 对拥堵相峰值存在保守偏差，则外部趋势残差可直接补偿。
+   Trend-Aware PatchEmbed 缓解局部趋势抹平，固定残差校正直接补偿拥堵相峰值低估。
 
 3. **具有明确物理解释**  
-   校正项直接来源于历史斜率，而不是黑盒偏置。
+   输入端显式编码 patch 内斜率，输出端显式沿历史趋势方向做一阶外推。
 
 4. **实验上已验证有效**  
-   当前保留版本在总 MAE 上优于原始 baseline：
-   \[
-   0.2296 \rightarrow 0.2281.
-   \]
+   当前最终保留版本在总 MAE、CG_MAE 与 TPR_CG 上都优于原始 baseline。
+
+---
+
+## 9. Main Experimental Results
+
+当前保留模型的核心实验结果如下。
+
+### 9.1 PatchEmbed 消融
+
+| 变体 | Epoch | 总 MAE | CG_MAE | TPR_CG |
+|------|------:|-------:|-------:|-------:|
+| 原始 PatchEmbed | 30 | 0.2296 | 30.8779 | 0.4519 |
+| Trend-Aware add | 30 | 0.2286 | 30.7527 | 0.4512 |
+| Trend-Aware concat | 30 | **0.2279** | **30.6623** | **0.4552** |
+
+Trend-Aware PatchEmbed（concat）显著优于 add，并将 CG_MAE 从 30.88 降至 30.66。
+
+### 9.2 固定趋势残差校正
+
+| \(\eta\) | 总 MAE | FF_MAE | CG_MAE | TPR_CG |
+|----------:|-------:|-------:|-------:|-------:|
+| 0.0 | 0.2279 | 13.7777 | 30.6623 | 0.4552 |
+| 0.3 | 0.2284 | 13.8420 | 30.8726 | 0.4510 |
+| 0.5 | **0.2276** | 13.7973 | **30.5635** | **0.4742** |
+| 1.0 | 0.2288 | 13.8933 | 30.8652 | 0.4544 |
+
+固定 \(\eta=0.5\) 在综合指标上最优，是当前最终保留设置。
+
+### 9.3 联合最优配置
+
+| 配置 | 总 MAE | FF_MAE | CG_MAE | TPR_CG |
+|------|-------:|-------:|-------:|-------:|
+| SimDiff 原始 | 0.2296 | 13.8832 | 30.8779 | 0.4519 |
+| Trend-Aware concat | 0.2279 | 13.7777 | 30.6623 | 0.4552 |
+| concat + \(\eta=0.5\) | **0.2276** | 13.7973 | **30.5635** | **0.4742** |
+
+因此，当前论文版本的最终模型应定义为：
+
+> **Trend-Aware PatchEmbed (concat) + fixed Historical Trend Residual (\(\eta=0.5\))**。

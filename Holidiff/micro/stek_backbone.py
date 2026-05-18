@@ -18,6 +18,24 @@ class TensorTranspose(nn.Module):
         return x.transpose(*self.dims)
 
 
+class TrendAwarePatchEmbedding(nn.Module):
+    def __init__(self, configs):
+        super().__init__()
+        self.patch_len = configs.patch_len
+        self.d_model = configs.d_model
+        self.concat_projection = nn.Linear(self.patch_len + 1, self.d_model)
+
+    def _compute_patch_slope(self, patch_tokens):
+        denom = max(self.patch_len - 1, 1)
+        slope = (patch_tokens[..., -1] - patch_tokens[..., 0]) / denom
+        return slope.unsqueeze(-1)
+
+    def forward(self, patch_tokens):
+        patch_slope = self._compute_patch_slope(patch_tokens)
+        patch_features = torch.cat([patch_tokens, patch_slope], dim=-1)
+        return self.concat_projection(patch_features)
+
+
 class TCPAttention(nn.Module):
     def __init__(self, config, over_hidden=False, trianable_smooth=False, untoken=False, *configs, **kwargs):
         super().__init__()
@@ -84,7 +102,7 @@ class STEKBackbone(nn.Module):
         self.patch_num = patch_num
         self.patch_num_forecast = patch_num_forecast
         configs.d_ff = configs.d_model * 2
-        self.W_input_projection = nn.Linear(self.patch_len, configs.d_model)
+        self.patch_embedding = TrendAwarePatchEmbedding(configs)
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
         self.W_outs = nn.Linear((patch_num + 1 + patch_num_forecast) * configs.d_model, configs.pred_len)
@@ -109,7 +127,7 @@ class STEKBackbone(nn.Module):
         hist_tokens = hist_macro_state.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         future_tokens = micro_realization.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
-        state_embeddings = self.input_dropout(self.W_input_projection(state_tokens))
+        state_embeddings = self.input_dropout(self.patch_embedding(state_tokens))
         time_token = self.cls(timesteps.float())
         state_embeddings = torch.cat((time_token, state_embeddings), dim=-2)
         inputs = state_embeddings

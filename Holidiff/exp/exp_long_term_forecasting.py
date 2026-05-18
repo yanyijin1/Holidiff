@@ -39,7 +39,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        model_optim = optim.Adam(trainable_params, lr=self.args.learning_rate)
         return model_optim
 
     def _select_criterion(self, loss_name='MSE'):
@@ -203,6 +204,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     time_now = time.time()
 
                 loss.backward()
+                physical_module = getattr(self._core_model(), 'physical_injection', None)
+                if physical_module is not None and hasattr(physical_module, 'record_eta_gradients'):
+                    physical_module.record_eta_gradients()
                 model_optim.step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
@@ -425,14 +429,27 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             if hasattr(core_model, 'physical_injection') and getattr(core_model.physical_injection, '_eta_history', None):
                 eta_diag = torch.cat(core_model.physical_injection._eta_history, dim=0).numpy()
                 eta_diag = eta_diag[:len(preds)] if len(eta_diag) >= len(preds) else eta_diag
-                print('[eta-diag] init={:.4f} mode={}'.format(
+                print('[eta-diag] init={:.4f} mode={} train_enabled={}'.format(
                     float(getattr(self.args, 'physical_residual_eta_init', 0.0)),
-                    getattr(self.args, 'physical_residual_mode', 'fixed')))
+                    getattr(self.args, 'physical_residual_mode', 'fixed'),
+                    bool(getattr(self.args, 'physical_residual_in_train', False))))
                 print('[eta-diag] mean={:.6f}, std={:.6f}, min={:.6f}, max={:.6f}'.format(
                     float(eta_diag.mean()), float(eta_diag.std()), float(eta_diag.min()), float(eta_diag.max())))
                 print('[eta-diag] FF mean={:.6f}, CG mean={:.6f}'.format(
                     float(eta_diag[ff_mask].mean()) if ff_mask.sum() > 0 else float('nan'),
                     float(eta_diag[cg_mask].mean()) if cg_mask.sum() > 0 else float('nan')))
+                grad_history = getattr(core_model.physical_injection, '_eta_grad_history', None)
+                if grad_history:
+                    grad_keys = sorted({key for item in grad_history for key in item.keys()})
+                    grad_summary = {}
+                    for key in grad_keys:
+                        vals = [item[key] for item in grad_history if item.get(key) is not None]
+                        if vals:
+                            grad_summary[key] = float(np.mean(vals))
+                    if grad_summary:
+                        print('[eta-grad] mean grad norms:', grad_summary)
+                    else:
+                        print('[eta-grad] all gradients are None or empty')
 
             print('[mom-metrics] version={}'.format(mom_ver))
             print('[mom-metrics] phase_mae: free={:.4f}, trans={:.4f}, cong={:.4f}'.format(ff_mae, tr_mae, cg_mae))

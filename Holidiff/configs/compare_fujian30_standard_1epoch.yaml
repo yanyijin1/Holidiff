@@ -46,6 +46,7 @@ down_sampling_method: null
 seg_len: 48
 stride: 1
 patch_len: 16
+patch_embed_mode: trend_aware_concat
 coss: 5.0
 rmom: 5
 n_b: 5
@@ -64,16 +65,9 @@ mom_alpha: 0.4
 mom_topk: 3
 mom_trend_temp: 5.0
 mom_lambda: 0.7
-physical_injection_enable: false
-physical_attention_enable: false
-physical_attention_lambda: 0.0
-physical_residual_enable: false
-physical_residual_eta: 0.0
-physical_residual_mode: "fixed"
-physical_residual_eta_init: 1.0
-physical_residual_eta_max: 2.0
-physical_residual_hidden_dim: 16
-physical_residual_in_train: false
+physical_injection_enable: true
+physical_residual_enable: true
+physical_residual_eta: 0.5
 physical_free_flow_epsilon: 0.0
 new_norm: 1
 use_shuffle: 1

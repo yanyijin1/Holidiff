@@ -39,13 +39,24 @@ def _build_parser():
     return parser
 
 
+def _str2bool(value):
+    if isinstance(value, bool):
+        return value
+    value = str(value).strip().lower()
+    if value in {'true', '1', 'yes', 'y', 'on'}:
+        return True
+    if value in {'false', '0', 'no', 'n', 'off'}:
+        return False
+    raise argparse.ArgumentTypeError(f'Invalid boolean value: {value}')
+
+
 def _merge_args_from_yaml(parser, cfg):
     for k, v in cfg.items():
         arg_name = f'--{k}'
         if any(a.option_strings and arg_name in a.option_strings for a in parser._actions):
             continue
         if isinstance(v, bool):
-            parser.add_argument(arg_name, action='store_true' if not v else 'store_false')
+            parser.add_argument(arg_name, type=_str2bool, default=v)
         else:
             parser.add_argument(arg_name, type=type(v), default=v)
 
@@ -92,6 +103,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='HoliDiff YAML runner', add_help=False)
     _merge_args_from_yaml(parser, cfg)
     parser.add_argument('--config', type=str, default=base_args.config)
+    parser.add_argument('--version', type=str, default=base_args.version)
     args = parser.parse_args()
 
     for k, v in cfg.items():
