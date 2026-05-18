@@ -1,106 +1,99 @@
 # HoliDiff Macro Diagnosis
 
-本目录用于按照 `docs/SimDiff_MoM_Flow_Diagnosis_Guide.md` 对 `Holidiff` 的 macro/MoM 聚合过程做诊断。
+这个目录只做一件事：
+对 `Holidiff` 的 macro / MoM 聚合做诊断，并把结果整理成可复用的表和图。
 
-## 目录说明
+## 目录
 
-- `scripts/`: 结果生成脚本，按 `step1/2/3` 命名
-- `plots/`: 绘图脚本，按 `step1/2/3` 命名
-- `output/`: 存放诊断生成的 CSV、NPY、Markdown 中间结果
-- `figures/`: 存放绘制出的 PNG 图
-- `result.md`: 客观结果整理文档
+- `scripts/`
+  - `step1_collect_diagnostics.py`：跑推理，导出原始诊断结果
+  - `step2_summarize_statistics.py`：做汇总统计和检验
+  - `step3_generate_result_md.py`：生成客观结果文档 `result.md`
+- `plots/`
+  - `step1_plot_sample_level.py`：样本级图
+  - `step2_plot_aggregation_level.py`：聚合级图
+  - `step3_plot_error_maps.py`：误差图、热力图、worst-case 时序对比图
+- `output/`：CSV / NPY / JSON 输出
+- `figures/`：PNG / PDF 图像输出
+- `result.md`：结果陈列文档
 
-## 脚本说明
+## 关键说明
 
-### scripts
+当前 `Fujian30CsvDataset` 里的 `x_mark / y_mark` 是全零占位，
+所以这里的：
 
-- `scripts/step1_collect_diagnostics.py`
-  - 加载 HoliDiff 配置与 checkpoint
-  - 在测试集上运行推理
-  - 读取模型内的诊断缓存
-  - 生成样本级、节点级、时间步级、小时级结果 CSV
-  - 输出热力图所需矩阵 CSV/NPY
+- `is_holiday`
+- `start_hour`
 
-- `scripts/step2_summarize_statistics.py`
-  - 对 `step1` 输出做汇总与统计检验
-  - 生成显著性检验表、Top 节点表、Top 时间步表、小时对比表
+不是从 `batch_y_mark` 直接取的，而是根据原始 CSV 时间轴和窗口索引恢复的。
 
-- `scripts/step3_generate_result_md.py`
-  - 将关键结果表整理为 `result.md`
-  - 不做主观解释，只做客观表格汇总和图像索引
+## step1 主要输出
 
-### plots
+- `step1_sample_metrics.csv`
+- `step1_node_metrics.csv`
+- `step1_timestep_metrics.csv`
+- `step1_hourly_metrics.csv`
+- `step1_node_timestep_mae_raw.csv`
+- `step1_node_timestep_inter_dev.csv`
+- `step1_node_timestep_intra_var.csv`
+- `step1_worst_case_overlays.csv`
+- `step1_overview.csv`
+- `step1_run_meta.json`
 
-- `plots/step1_plot_sample_level.py`
-  - 生成样本级图：组内方差箱线图、方差-MAE 散点图、流相态 MAE 箱线图
+其中 `step1_worst_case_overlays.csv` 用于画最直观的预测对比图：
 
-- `plots/step2_plot_aggregation_level.py`
-  - 生成聚合级图：组间离散度箱线图、组间离散度-中位数偏移散点图、高低离散度偏移对比图
+- 前半段蓝线：历史真实输入
+- 后半段蓝虚线：未来真实值
+- 后半段红线：未来预测值
 
-- `plots/step3_plot_error_maps.py`
-  - 生成误差与热力图：预测 horizon MAE 曲线、小时级 MAE 曲线、节点 Top-10、时空热力图
+## 推荐执行顺序
 
-## 输出文件说明
-
-### output 中的主要文件
-
-- `step1_sample_metrics.csv`: 每个测试样本的误差、节假日标签、流相态、组内方差、组间离散度、中位数偏移
-- `step1_node_metrics.csv`: 每个节点的平均误差与平均诊断量
-- `step1_timestep_metrics.csv`: 每个预测步长的平均误差与平均诊断量
-- `step1_hourly_metrics.csv`: 按 `is_holiday × start_hour` 聚合的小时级结果
-- `step1_node_timestep_mae_raw.csv`: 节点 × 预测步 的 MAE 矩阵
-- `step1_node_timestep_inter_dev.csv`: 节点 × 预测步 的组间离散度矩阵
-- `step1_node_timestep_intra_var.csv`: 节点 × 预测步 的组内方差矩阵
-- `step2_summary_metrics.csv`: 汇总后的整体指标表
-- `step2_stat_tests.csv`: 统计检验结果表
-- `step2_top10_nodes.csv`: 高误差节点 Top-10
-- `step2_hardest_timesteps.csv`: 高误差预测步 Top 列表
-- `step2_hourly_compare.csv`: 小时级节假日/常规日对比表
-
-## 使用顺序
-
-### 1. 生成诊断结果
+### 1. 导出诊断结果
 
 ```bash
 python /root/yanyijin/STdiff/diagnosis/macro/scripts/step1_collect_diagnostics.py \
-  --config /root/yanyijin/STdiff/Holidiff/configs/compare_fujian30_standard_1epoch.yaml
+  --config /root/yanyijin/STdiff/Holidiff/configs/compare_fujian30_standard_30epoch_base.yaml \
+  --output_dir /root/yanyijin/STdiff/diagnosis/macro/output/base
 ```
 
-如需指定 checkpoint：
+### 2. 汇总统计
 
 ```bash
-python /root/yanyijin/STdiff/diagnosis/macro/scripts/step1_collect_diagnostics.py \
-  --config /root/yanyijin/STdiff/Holidiff/configs/compare_fujian30_standard_1epoch.yaml \
-  --checkpoint /path/to/checkpoint.pth
+python /root/yanyijin/STdiff/diagnosis/macro/scripts/step2_summarize_statistics.py \
+  --input_dir /root/yanyijin/STdiff/diagnosis/macro/output/base \
+  --output_dir /root/yanyijin/STdiff/diagnosis/macro/output/base
 ```
 
-### 2. 生成统计摘要
+### 3. 生成图像
 
 ```bash
-python /root/yanyijin/STdiff/diagnosis/macro/scripts/step2_summarize_statistics.py
+python /root/yanyijin/STdiff/diagnosis/macro/plots/step1_plot_sample_level.py \
+  --input_dir /root/yanyijin/STdiff/diagnosis/macro/output/base \
+  --figures_dir /root/yanyijin/STdiff/diagnosis/macro/figures/base
+
+python /root/yanyijin/STdiff/diagnosis/macro/plots/step2_plot_aggregation_level.py \
+  --input_dir /root/yanyijin/STdiff/diagnosis/macro/output/base \
+  --figures_dir /root/yanyijin/STdiff/diagnosis/macro/figures/base
+
+python /root/yanyijin/STdiff/diagnosis/macro/plots/step3_plot_error_maps.py \
+  --input_dir /root/yanyijin/STdiff/diagnosis/macro/output/base \
+  --figures_dir /root/yanyijin/STdiff/diagnosis/macro/figures/base
 ```
 
-### 3. 绘图
+### 4. 生成结果文档
 
 ```bash
-python /root/yanyijin/STdiff/diagnosis/macro/plots/step1_plot_sample_level.py
-python /root/yanyijin/STdiff/diagnosis/macro/plots/step2_plot_aggregation_level.py
-python /root/yanyijin/STdiff/diagnosis/macro/plots/step3_plot_error_maps.py
+python /root/yanyijin/STdiff/diagnosis/macro/scripts/step3_generate_result_md.py \
+  --input_dir /root/yanyijin/STdiff/diagnosis/macro/output/base \
+  --figures_dir /root/yanyijin/STdiff/diagnosis/macro/figures/base \
+  --output_md /root/yanyijin/STdiff/diagnosis/macro/result.md
 ```
 
-### 4. 生成结果 Markdown
+## 双配置建议
 
-```bash
-python /root/yanyijin/STdiff/diagnosis/macro/scripts/step3_generate_result_md.py
-```
+如果你同时比较 `base` 和 `doc` 两套配置，建议分别输出到：
 
-## 依赖说明
+- `output/base`, `figures/base`
+- `output/doc`, `figures/doc`
 
-建议环境中具备：
-
-- `torch`
-- `numpy`
-- `pandas`
-- `matplotlib`
-- `pyyaml`
-- `scipy`（若没有，统计检验结果会输出为 NaN）
+避免覆盖。

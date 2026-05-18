@@ -164,6 +164,7 @@ class Fujian30CsvDataset(Dataset):
             self.raw_data = self.scaler.transform(raw_data).astype(np.float32)
         else:
             self.raw_data = raw_data
+        self.raw_zero_mask = (raw_data != 0).astype(np.float32)
 
         meta = df.groupby('time_slot').first().sort_index()
         self.holiday_flag = meta['is_holiday'].values.astype(np.float32)
@@ -211,9 +212,10 @@ class Fujian30CsvDataset(Dataset):
         p = e + self.pred_len
         x = torch.from_numpy(self.raw_data[s:e]).float()
         y = torch.from_numpy(self.raw_data[e:p]).float()
+        y_mask = torch.from_numpy(self.raw_zero_mask[e:p]).float()
         x_mark = torch.zeros(self.input_len, 1)
         y_mark = torch.zeros(self.input_len + self.pred_len, 1)
-        return x, y, x_mark, y_mark
+        return x, y, x_mark, y_mark, y_mask
 
 
 def get_dataloader(csv_path, adj_path, split, mode,

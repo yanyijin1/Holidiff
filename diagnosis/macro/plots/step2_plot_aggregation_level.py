@@ -18,7 +18,7 @@ def main():
     fig_dir = Path(c.figures_dir)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
-    sample = pd.read_csv(in_dir / 'step1_sample_metrics.csv')
+    sample = pd.read_csv(in_dir / 'step1_sample_metrics.csv').copy()
 
     fig, ax = plt.subplots(figsize=(6, 4))
     groups = [sample.loc[sample['is_holiday'] == 0, 'inter_dev'], sample.loc[sample['is_holiday'] == 1, 'inter_dev']]
@@ -27,6 +27,7 @@ def main():
     ax.set_ylabel('inter_dev')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step2_inter_dev_boxplot.png', dpi=200)
+    fig.savefig(fig_dir / 'step2_inter_dev_boxplot.pdf')
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -37,10 +38,11 @@ def main():
     ax.set_title('Inter-group deviation vs median bias')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step2_inter_dev_vs_median_bias.png', dpi=200)
+    fig.savefig(fig_dir / 'step2_inter_dev_vs_median_bias.pdf')
     plt.close(fig)
 
     cutoff = sample['inter_dev'].quantile(0.8)
-    sample['inter_group'] = ['high_inter' if x >= cutoff else 'low_inter' for x in sample['inter_dev']]
+    sample['inter_group'] = ['high_inter' if value >= cutoff else 'low_inter' for value in sample['inter_dev']]
     fig, ax = plt.subplots(figsize=(6, 4))
     vals = [sample.loc[sample['inter_group'] == 'low_inter', 'median_bias'], sample.loc[sample['inter_group'] == 'high_inter', 'median_bias']]
     ax.boxplot(vals, labels=['low_inter', 'high_inter'])
@@ -48,6 +50,7 @@ def main():
     ax.set_ylabel('median_bias')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step2_median_bias_group_compare.png', dpi=200)
+    fig.savefig(fig_dir / 'step2_median_bias_group_compare.pdf')
     plt.close(fig)
 
 

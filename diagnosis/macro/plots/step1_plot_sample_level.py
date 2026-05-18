@@ -27,6 +27,7 @@ def main():
     ax.set_ylabel('intra_var')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step1_intra_var_boxplot.png', dpi=200)
+    fig.savefig(fig_dir / 'step1_intra_var_boxplot.pdf')
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 4))
@@ -37,16 +38,18 @@ def main():
     ax.set_title('Intra-group variance vs sample MAE')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step1_intra_var_vs_mae.png', dpi=200)
+    fig.savefig(fig_dir / 'step1_intra_var_vs_mae.pdf')
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(6, 4))
     phase_order = ['free_flow', 'transition', 'congested']
-    phase_vals = [sample.loc[sample['phase'] == p, 'sample_mae_raw'] for p in phase_order]
+    phase_vals = [sample.loc[sample['phase'] == phase, 'sample_mae_raw'] for phase in phase_order]
     ax.boxplot(phase_vals, labels=phase_order)
     ax.set_title('Sample MAE by flow phase')
     ax.set_ylabel('sample_mae_raw')
     fig.tight_layout()
     fig.savefig(fig_dir / 'step1_phase_mae_boxplot.png', dpi=200)
+    fig.savefig(fig_dir / 'step1_phase_mae_boxplot.pdf')
     plt.close(fig)
 
 

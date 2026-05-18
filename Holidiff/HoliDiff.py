@@ -8,6 +8,7 @@ from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
 from Holidiff.utils.diffusion_utils import *
 from Holidiff.layers.RevIN import RevIN
+from Holidiff.micro.physical_injection import PhysicalInjectionModule
 
 
 
@@ -57,6 +58,7 @@ class HATEK(nn.Module):
         self.nn = self.tek
         self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
         self.nda_layer = RevIN(self.enc_in, affine=True, subtract_last=False)
+        self.physical_injection = PhysicalInjectionModule(configs)
         self.reset_diagnostics()
 
 
@@ -100,10 +102,11 @@ class HATEK(nn.Module):
             #print(t,t.shape)
             noise = torch.randn_like(x)
             x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
-            model_out= self.nn(x_k, t, cond_ts,x_mark_enc)
+            model_out= self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
             model_out=torch.reshape(model_out,(B,N,target_len))
             model_out = model_out.permute(0,2,1) #(B,TARGET L,N)
             model_out=self.nda_layer(model_out,'denorm')
+            model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             model_out = model_out.permute(0,2,1)  #(B,N,TARGET L)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
         else:
@@ -124,9 +127,12 @@ class HATEK(nn.Module):
             #print(t,t.shape)
             noise = torch.randn_like(x)
             x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
-            model_out = self.nn(x_k, t, cond_ts,x_mark_enc)
+            model_out = self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
             model_out = torch.reshape(model_out,(B,N,target_len))
             model_out = model_out*(std_+0.00001) + mean_#(B,N,TARGET L)
+            model_out = model_out.permute(0,2,1)
+            model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
+            model_out = model_out.permute(0,2,1)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
         return model_out,weight_tmp
 
@@ -159,6 +165,8 @@ class HATEK(nn.Module):
             diff_samples ,_= self.sampler.sample(S=self.configs.s_steps,
                                              conditioning=x_past,
                                              x_mark_enc=x_mark_enc,
+                                             raw_history=x_enc,
+                                             physical_injection=self.physical_injection,
                                              batch_size=batchs,
                                              shape=shape,
                                              verbose=False,
@@ -173,6 +181,7 @@ class HATEK(nn.Module):
             else:
                 diff_samples = diff_samples.to(self.device)*(std_+0.00001) + mean_
                 diff_samples = diff_samples.permute(0,2,1)
+            diff_samples = self.physical_injection.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
         if self.configs.use_mom and sample_times>1:
@@ -241,6 +250,8 @@ class HATEK(nn.Module):
         self._diag_inter_dev_map = []
         self._diag_mean_pred = []
         self._diag_median_pred = []
+        if hasattr(self, 'physical_injection') and hasattr(self.physical_injection, 'reset_eta_diagnostics'):
+            self.physical_injection.reset_eta_diagnostics()
 
     def _consensus_reduce(self, tensor):
         if self.n_blocks > tensor.size(0):

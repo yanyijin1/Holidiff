@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,8 @@ def main():
     timestep = pd.read_csv(in_dir / 'step1_timestep_metrics.csv')
     hourly = pd.read_csv(in_dir / 'step1_hourly_metrics.csv')
     overview = pd.read_csv(in_dir / 'step1_overview.csv')
+    baseline = pd.read_csv(in_dir / 'step1_baseline_metrics.csv') if (in_dir / 'step1_baseline_metrics.csv').exists() else None
+    meta = json.loads((in_dir / 'step1_run_meta.json').read_text(encoding='utf-8')) if (in_dir / 'step1_run_meta.json').exists() else {}
 
     holiday = sample[sample['is_holiday'] == 1]
     normal = sample[sample['is_holiday'] == 0]
@@ -53,15 +56,20 @@ def main():
 
     summary_rows = [
         {'analysis': 'overall', 'metric': 'mae_raw_mean', 'value': float(sample['sample_mae_raw'].mean())},
+        {'analysis': 'overall', 'metric': 'mae_raw_masked_mean', 'value': float(sample['sample_mae_raw_masked'].mean())},
         {'analysis': 'overall', 'metric': 'rmse_raw_mean', 'value': float(sample['sample_rmse_raw'].mean())},
+        {'analysis': 'overall', 'metric': 'rmse_raw_masked_mean', 'value': float(sample['sample_rmse_raw_masked'].mean())},
         {'analysis': 'overall', 'metric': 'intra_var_mean', 'value': float(sample['intra_var'].mean())},
         {'analysis': 'overall', 'metric': 'inter_dev_mean', 'value': float(sample['inter_dev'].mean())},
         {'analysis': 'overall', 'metric': 'median_bias_mean', 'value': float(sample['median_bias'].mean())},
+        {'analysis': 'overall', 'metric': 'zero_ratio_true_raw_mean', 'value': float(sample['zero_ratio_true_raw'].mean())},
         {'analysis': 'overall', 'metric': 'negative_ratio_raw_mean', 'value': float(sample['negative_ratio_raw'].mean())},
         {'analysis': 'holiday', 'metric': 'sample_count', 'value': int(len(holiday))},
         {'analysis': 'normal', 'metric': 'sample_count', 'value': int(len(normal))},
         {'analysis': 'holiday', 'metric': 'mae_raw_mean', 'value': float(holiday['sample_mae_raw'].mean()) if len(holiday) else np.nan},
         {'analysis': 'normal', 'metric': 'mae_raw_mean', 'value': float(normal['sample_mae_raw'].mean()) if len(normal) else np.nan},
+        {'analysis': 'holiday', 'metric': 'mae_raw_masked_mean', 'value': float(holiday['sample_mae_raw_masked'].mean()) if len(holiday) else np.nan},
+        {'analysis': 'normal', 'metric': 'mae_raw_masked_mean', 'value': float(normal['sample_mae_raw_masked'].mean()) if len(normal) else np.nan},
         {'analysis': 'holiday', 'metric': 'intra_var_mean', 'value': float(holiday['intra_var'].mean()) if len(holiday) else np.nan},
         {'analysis': 'normal', 'metric': 'intra_var_mean', 'value': float(normal['intra_var'].mean()) if len(normal) else np.nan},
         {'analysis': 'holiday', 'metric': 'inter_dev_mean', 'value': float(holiday['inter_dev'].mean()) if len(holiday) else np.nan},
@@ -71,14 +79,24 @@ def main():
         {'analysis': 'free_flow', 'metric': 'mae_raw_mean', 'value': float(free_flow['sample_mae_raw'].mean()) if len(free_flow) else np.nan},
         {'analysis': 'transition', 'metric': 'mae_raw_mean', 'value': float(transition['sample_mae_raw'].mean()) if len(transition) else np.nan},
         {'analysis': 'congested', 'metric': 'mae_raw_mean', 'value': float(congested['sample_mae_raw'].mean()) if len(congested) else np.nan},
+        {'analysis': 'free_flow', 'metric': 'mae_raw_masked_mean', 'value': float(free_flow['sample_mae_raw_masked'].mean()) if len(free_flow) else np.nan},
+        {'analysis': 'transition', 'metric': 'mae_raw_masked_mean', 'value': float(transition['sample_mae_raw_masked'].mean()) if len(transition) else np.nan},
+        {'analysis': 'congested', 'metric': 'mae_raw_masked_mean', 'value': float(congested['sample_mae_raw_masked'].mean()) if len(congested) else np.nan},
     ]
+    if baseline is not None and len(baseline) > 0:
+        for col in ['mae', 'mse', 'rmse']:
+            if col in baseline.columns:
+                summary_rows.append({'analysis': 'baseline_log', 'metric': col, 'value': float(baseline[col].iloc[-1])})
     pd.DataFrame(summary_rows).to_csv(out_dir / 'step2_summary_metrics.csv', index=False)
 
     stat_rows = []
     for x_col, y_col, name in [
         ('intra_var', 'sample_mae_raw', 'intra_vs_mae'),
+        ('intra_var', 'sample_mae_raw_masked', 'intra_vs_mae_masked'),
         ('inter_dev', 'sample_mae_raw', 'inter_vs_mae'),
+        ('inter_dev', 'sample_mae_raw_masked', 'inter_vs_mae_masked'),
         ('median_bias', 'sample_mae_raw', 'median_bias_vs_mae'),
+        ('median_bias', 'sample_mae_raw_masked', 'median_bias_vs_mae_masked'),
         ('inter_dev', 'median_bias', 'inter_vs_median_bias'),
     ]:
         rho, pval = safe_spearman(sample[x_col], sample[y_col])
@@ -104,9 +122,8 @@ def main():
     hourly_pivot.columns = ['start_hour'] + [f'sample_mae_raw_holiday_{int(x)}' for x in hourly_pivot.columns[1:]]
     hourly_pivot.to_csv(out_dir / 'step2_hourly_compare.csv', index=False)
 
-    merged = overview.copy()
-    merged['source'] = 'step1_overview'
-    merged.to_csv(out_dir / 'step2_overview_echo.csv', index=False)
+    overview.assign(source='step1_overview').to_csv(out_dir / 'step2_overview_echo.csv', index=False)
+    pd.DataFrame([meta]).to_csv(out_dir / 'step2_run_meta_echo.csv', index=False)
     print(f'Saved step2 summaries to {out_dir}')
 
 
