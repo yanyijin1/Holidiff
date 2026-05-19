@@ -45,7 +45,7 @@ down_sampling_window: 1
 down_sampling_method: null
 seg_len: 48
 stride: 1
-patch_len: 16
+patch_len: 12
 patch_embed_mode: trend_aware_concat
 coss: 5.0
 rmom: 5
@@ -69,6 +69,18 @@ physical_injection_enable: true
 physical_residual_enable: true
 physical_residual_eta: 0.5
 physical_free_flow_epsilon: 0.0
+frequency_enable: true
+frequency_decomp_type: fixed_fft
+frequency_num_bands: 4
+frequency_patch_embed_mode: band_trend
+frequency_patch_embed_fusion: concat_proj
+frequency_patch_embed_num_bands: 4
+frequency_injection_mode: embed_replace
+frequency_residual_type: hybrid_residual
+frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
+frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
+frequency_use_softplus_eta: true
+frequency_hybrid_mix_alpha: 0.5
 new_norm: 1
 use_shuffle: 1
 use_first: 0

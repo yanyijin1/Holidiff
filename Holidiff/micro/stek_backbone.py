@@ -97,6 +97,7 @@ class STEKBackbone(nn.Module):
         self.stride = configs.stride
         self.d_model = configs.d_model
         self.n_blocks = configs.n_b
+        self.frequency_conditioner_dim = int(getattr(configs, 'frequency_conditioner_dim', 8))
         patch_num = int((configs.seq_len - self.patch_len) / self.stride + 1)
         patch_num_forecast = max(1, int((configs.pred_len - self.patch_len) / self.stride + 1))
         self.patch_num = patch_num
@@ -118,7 +119,7 @@ class STEKBackbone(nn.Module):
             for _ in range(configs.e_layers)
         ])
 
-    def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None, raw_history=None, physical_injection=None):
+    def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None, raw_history=None, physical_injection=None, frequency_patch_embedding=None):
         b, c, s = micro_realization.shape
         if hist_macro_state.shape[-1] < self.patch_len:
             hist_macro_state = torch.nn.functional.pad(hist_macro_state, (0, self.patch_len - hist_macro_state.shape[-1]), mode='replicate')
@@ -128,6 +129,12 @@ class STEKBackbone(nn.Module):
         future_tokens = micro_realization.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
         state_embeddings = self.input_dropout(self.patch_embedding(state_tokens))
+        if frequency_patch_embedding is not None:
+            if frequency_patch_embedding.size(-2) != state_embeddings.size(-2):
+                min_tokens = min(frequency_patch_embedding.size(-2), state_embeddings.size(-2))
+                frequency_patch_embedding = frequency_patch_embedding[:, :, :min_tokens, :]
+                state_embeddings = state_embeddings[:, :, :min_tokens, :]
+            state_embeddings = state_embeddings + frequency_patch_embedding.to(device=state_embeddings.device, dtype=state_embeddings.dtype)
         time_token = self.cls(timesteps.float())
         state_embeddings = torch.cat((time_token, state_embeddings), dim=-2)
         inputs = state_embeddings
