@@ -81,6 +81,13 @@ frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
+phase_e_enable: false
+phase_e_target_adapter: vanilla_ni
+phase_e_revin_adapter: vanilla_revin
+phase_e_graph_mode: directed
+phase_e_zeta_init: 0.1
+phase_e_field_eta: 0.1
+phase_e_use_edge_sigma_fallback: false
 new_norm: 1
 use_shuffle: 1
 use_first: 0

@@ -7,8 +7,8 @@ import torch.nn as nn
 from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
 from Holidiff.utils.diffusion_utils import *
-from Holidiff.layers.RevIN import RevIN
 from Holidiff.micro.physical_injection import PhysicalInjectionModule
+from Holidiff.micro.phase_e_factory import build_revin_adapter, build_target_adapter
 
 
 
@@ -57,7 +57,8 @@ class HATEK(nn.Module):
         self.eps = 1e-5
         self.nn = self.tek
         self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
-        self.nda_layer = RevIN(self.enc_in, affine=True, subtract_last=False)
+        self.target_adapter = build_target_adapter(configs)
+        self.revin_adapter = build_revin_adapter(configs)
         self.physical_injection = PhysicalInjectionModule(configs)
         self.reset_diagnostics()
 
@@ -84,12 +85,13 @@ class HATEK(nn.Module):
         x=x[:,f_dim:,:]
         cond_ts = x_enc#(B,L,N)
         if self.configs.new_norm:
-            cond_ts = self.nda_layer(cond_ts,'norm')
+            cond_ts = self.revin_adapter.forward_norm(cond_ts)
             cond_ts = cond_ts.permute(0,2,1) #(B,N,L)
-            lenth = np.shape(x)[1] 
-            mean_ = torch.mean(x[:,-lenth:,:], dim=1).unsqueeze(1)
-            std_ = torch.ones_like(torch.std(x, dim=1).unsqueeze(1))
-            x = (x-mean_.repeat(1,lenth,1))/(std_.repeat(1,lenth,1)+0.00001)
+            x, _ = self.target_adapter.normalize_training_future(
+                x_future=x,
+                x_history=cond_ts,
+                use_revin_norm=True,
+            )
             B = np.shape(x)[0]
             N = self.configs.enc_in
             L1 = np.shape(cond_ts)[2]
@@ -105,7 +107,7 @@ class HATEK(nn.Module):
             model_out= self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
             model_out=torch.reshape(model_out,(B,N,target_len))
             model_out = model_out.permute(0,2,1)
-            model_out=self.nda_layer(model_out,'denorm')
+            model_out=self.revin_adapter.forward_denorm(model_out)
             model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             model_out = model_out.permute(0,2,1)
             weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
@@ -153,12 +155,17 @@ class HATEK(nn.Module):
         N = self.configs.enc_in
         if self.configs.new_norm:
             x_past = x_past.permute(0,2,1) #(B,L,N)
-            x_past = self.nda_layer(x_past,'norm')
+            x_past = self.revin_adapter.forward_norm(x_past)
             x_past = x_past.permute(0,2,1) #(B,N,L)
+            _, inference_stats = self.target_adapter.normalize_inference_history(
+                x_history=x_past,
+                use_revin_norm=True,
+            )
         else:
-            mean_ = torch.mean(x_past, dim=-1,keepdims=True)
-            std_ = torch.std(x_past, dim=-1,keepdims=True)
-            x_past = (x_past-mean_)/(std_+0.00001)
+            x_past, inference_stats = self.target_adapter.normalize_inference_history(
+                x_history=x_past,
+                use_revin_norm=False,
+            )
         x_past = torch.reshape(x_past,(B*N,-1))
         x_past = x_past.to(self.betas.device)
         for i in range(sample_times):
@@ -178,9 +185,21 @@ class HATEK(nn.Module):
             diff_samples=torch.reshape(diff_samples,(B,N,-1))      
             if self.configs.new_norm:
                 diff_samples = diff_samples.permute(0,2,1).to(self.device)
-                diff_samples = self.nda_layer(diff_samples,'denorm')
+                diff_samples = self.revin_adapter.forward_denorm(diff_samples)
+                diff_samples = diff_samples.permute(0,2,1)
+                diff_samples = self.target_adapter.denormalize_prediction(
+                    diff_samples,
+                    inference_stats,
+                    use_revin_norm=True,
+                )
+                diff_samples = diff_samples.permute(0,2,1)
             else:
-                diff_samples = diff_samples.to(self.device)*(std_+0.00001) + mean_
+                diff_samples = diff_samples.to(self.device)
+                diff_samples = self.target_adapter.denormalize_prediction(
+                    diff_samples,
+                    inference_stats,
+                    use_revin_norm=False,
+                )
                 diff_samples = diff_samples.permute(0,2,1)
             diff_samples = self.physical_injection.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             all_outs.append(diff_samples)

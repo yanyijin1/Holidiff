@@ -416,6 +416,27 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             hol_cg_mae = float(sample_mae[hol_cg_mask].mean()) if hol_cg_mask.sum() > 0 else float('nan')
             nor_cg_mae = float(sample_mae[nor_cg_mask].mean()) if nor_cg_mask.sum() > 0 else float('nan')
 
+            adj_path = os.path.join(self.args.root_path, 'adjacent_gantry.csv')
+            if os.path.exists(adj_path):
+                adj_df = pd.read_csv(adj_path)
+                if {'src_FID', 'nbr_FID'}.issubset(adj_df.columns):
+                    nodes = sorted(set(adj_df['src_FID'].astype(int)).union(set(adj_df['nbr_FID'].astype(int))))
+                    node_to_idx = {nid: i for i, nid in enumerate(nodes)}
+                    adj = np.zeros((len(nodes), len(nodes)), dtype=np.float32)
+                    for _, row in adj_df.iterrows():
+                        adj[node_to_idx[int(row['src_FID'])], node_to_idx[int(row['nbr_FID'])]] = 1.0
+                else:
+                    adj = adj_df.values.astype(np.float32)
+            else:
+                adj = np.eye(preds_raw.shape[-1], dtype=np.float32)
+            edge_pairs = np.argwhere(adj > 0)
+            if len(edge_pairs) > 0:
+                pred_edge = np.stack([preds_raw[:, :, j] - preds_raw[:, :, i] for i, j in edge_pairs], axis=-1)
+                true_edge = np.stack([trues_raw[:, :, j] - trues_raw[:, :, i] for i, j in edge_pairs], axis=-1)
+                sgfe = float(np.mean(np.abs(pred_edge - true_edge)))
+            else:
+                sgfe = float('nan')
+
             # TPR: 趋势保留率
             hist_raw = self._inverse_transform(test_data, histories) if hasattr(self, '_inverse_transform') else histories
             s_hist = hist_raw[:, -1, :] - hist_raw[:, 0, :]
@@ -455,6 +476,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             print('[mom-metrics] phase_mae: free={:.4f}, trans={:.4f}, cong={:.4f}'.format(ff_mae, tr_mae, cg_mae))
             print('[mom-metrics] holiday_mae: hol={:.4f}, nor={:.4f}, hol_cong={:.4f}, nor_cong={:.4f}'.format(hol_mae, nor_mae, hol_cg_mae, nor_cg_mae))
             print('[mom-metrics] tpr: all={:.4f}, cong={:.4f}, true_cong={:.4f}'.format(tpr_all, tpr_cg, tpr_true_cg))
+            print('[phase-e] sgfe: {:.4f}'.format(sgfe))
+            if hasattr(core_model, 'target_adapter') and hasattr(core_model.target_adapter, 'zeta'):
+                zeta_val = core_model.target_adapter.zeta.detach().float().cpu().item()
+                print('[phase-e] zeta: {:.6f}'.format(zeta_val))
+            if hasattr(core_model, 'revin_adapter') and hasattr(core_model.revin_adapter, 'eta'):
+                eta_val = core_model.revin_adapter.eta.detach().float().cpu().item()
+                print('[phase-e] field_eta: {:.6f}'.format(eta_val))
 
             with open(os.path.join(diag_path, 'diagnostic_summary.json'), 'w', encoding='utf-8') as fp:
                 json.dump({
@@ -474,6 +502,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     'congested_mae_mean': float(congested_df['sample_mae'].mean()) if len(congested_df) else None,
                     'mwu_holiday_pvalue': p_holiday,
                     'mwu_congested_pvalue': p_phase,
+                    'sgfe': sgfe,
+                    'phase_e_enable': bool(getattr(self.args, 'phase_e_enable', False)),
+                    'phase_e_target_adapter': getattr(self.args, 'phase_e_target_adapter', 'vanilla_ni'),
+                    'phase_e_revin_adapter': getattr(self.args, 'phase_e_revin_adapter', 'vanilla_revin'),
+                    'phase_e_zeta_value': float(core_model.target_adapter.zeta.detach().float().cpu().item()) if hasattr(core_model, 'target_adapter') and hasattr(core_model.target_adapter, 'zeta') else None,
+                    'phase_e_field_eta_value': float(core_model.revin_adapter.eta.detach().float().cpu().item()) if hasattr(core_model, 'revin_adapter') and hasattr(core_model.revin_adapter, 'eta') else None,
                 }, fp, ensure_ascii=False, indent=2)
 
         return mae, mse, rmse

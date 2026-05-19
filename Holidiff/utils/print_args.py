@@ -49,6 +49,17 @@ def print_args(args):
     print(f'  {"Lradj:":<20}{args.lradj:<20}{"Use Amp:":<20}{args.use_amp:<20}')
     print()
 
+    print("\033[1m" + "Physical / Frequency Modules" + "\033[0m")
+    print(f'  {"Physical Injection:":<20}{args.physical_injection_enable:<20}{"Physical Residual:":<20}{args.physical_residual_enable:<20}')
+    print(f'  {"Residual Eta:":<20}{args.physical_residual_eta:<20}{"FreeFlow Eps:":<20}{args.physical_free_flow_epsilon:<20}')
+    if hasattr(args, 'frequency_enable'):
+        print(f'  {"Frequency Enable:":<20}{args.frequency_enable:<20}{"Freq Decomp:":<20}{args.frequency_decomp_type:<20}')
+        print(f'  {"Freq Residual:":<20}{args.frequency_residual_type:<20}{"Num Bands:":<20}{args.frequency_num_bands:<20}')
+        print(f'  {"Freq Inject:":<20}{args.frequency_injection_mode:<20}{"Hybrid Mix:":<20}{args.frequency_hybrid_mix_alpha:<20}')
+        if hasattr(args, 'frequency_conditioner_mode'):
+            print(f'  {"Freq Cond Mode:":<20}{args.frequency_conditioner_mode:<20}{"Cond Dim:":<20}{args.frequency_conditioner_dim:<20}')
+    print()
+
     print("\033[1m" + "GPU" + "\033[0m")
     print(f'  {"Use GPU:":<20}{args.use_gpu:<20}{"GPU:":<20}{args.gpu:<20}')
     print(f'  {"Use Multi GPU:":<20}{args.use_multi_gpu:<20}{"Devices:":<20}{args.devices:<20}')
