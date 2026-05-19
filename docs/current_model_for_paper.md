@@ -293,7 +293,27 @@ $$K=4,\ \texttt{patch\_len}=12,\ \texttt{frequency\_decomp}=\texttt{fixed\_fft}.
 | Physical Residual Eta | 0.5 |
 | Patch Length | 12 |
 | Stride | 1 |
+| Spatial Field Enable | true |
+| Spatial Field Target Adapter | matrix_ni |
+| Spatial Field Coupling $\zeta$ | 0.05 (fixed) |
+| Spatial Edge Variance Window | 720 |
+| Spatial Adjacency | topology |
+| Local Scaling Adapter | vanilla_revin |
 
 据此，当前论文版本模型可定义为：
 
-> **Trend-Aware PatchEmbed (concat) + Phase-D Frequency Core (fixed FFT, $K=4$, patch_len=12) + Hybrid Residual ($\eta=0.5$)**。
+> **Trend-Aware PatchEmbed (concat) + Phase-D Frequency Core (fixed FFT, $K=4$, patch_len=12) + Hybrid Residual ($\eta=0.5$) + SFCN target adapter ($\zeta=0.05$, edge-var window = 720)**。
+
+### 7.5 SFCN 精细化实验结果对比（20 epoch 口径）
+
+| 实验 | 配置变化 | Test MAE | Test RMSE | Cong MAE | Hol\_Cong MAE | SGFE | 结论 |
+|---|---|---:|---:|---:|---:|---:|---|
+| exp1\_zeta005 | $\zeta=0.05$ | **0.2267** | **0.3151** | 30.3810 | **35.7827** | **25.2717** | 最优初始化 |
+| exp1\_zeta01 | $\zeta=0.10$ | 0.2268 | 0.3151 | 30.3854 | 35.7943 | 25.2947 | 略差于 0.05 |
+| exp1\_zeta02 | $\zeta=0.20$ | 0.2269 | 0.3153 | 30.4008 | 35.8199 | 25.3471 | 更大初始化无收益 |
+| exp2\_edgevar168 | edge-var window = 168 | 0.2269 | 0.3153 | 30.4038 | 35.8231 | 25.3483 | 短窗口不稳定 |
+| exp2\_edgevar336 | edge-var window = 336 | 0.2268 | 0.3152 | 30.3864 | 35.8101 | 25.3474 | 中等窗口仍不如长窗 |
+| exp2\_edgevar720 | edge-var window = 720 | **0.2267** | **0.3151** | **30.3677** | 35.7945 | 25.3476 | 最优边统计窗口 |
+| exp3\_directed\_adj | mean-gradient directed adjacency | 0.2296 | 0.3191 | 30.6763 | 36.2049 | 25.5951 | 明显退化，删除 |
+
+这一轮精细化实验表明：SFCN 模块的最优保留策略并不是引入更复杂的方向化邻接或短时自适应统计，而是保留**最简单且最稳定**的设置：固定拓扑邻接、较小的场耦合系数 $\zeta=0.05$、以及较长时间窗口（720）估计边差值标准差。方向化邻接在总 MAE、拥堵相 MAE、Hol\_Cong MAE 与 SGFE 上均明显退化，因此不再保留进最终模型。

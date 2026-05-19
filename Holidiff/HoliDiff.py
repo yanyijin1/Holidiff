@@ -6,9 +6,8 @@ from functools import partial
 import torch.nn as nn
 from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
+from Holidiff.macro.aggregation_factory import build_macro_aggregator
 from Holidiff.utils.diffusion_utils import *
-from Holidiff.micro.physical_injection import PhysicalInjectionModule
-from Holidiff.micro.phase_e_factory import build_revin_adapter, build_target_adapter
 
 
 
@@ -42,6 +41,10 @@ class HATEK(nn.Module):
         self.num_heads=configs.num_heads
         self.rmom_n = configs.rmom
         self.n_blocks = configs.n_b
+        self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom' if getattr(configs, 'use_mom', False) else 'simple')).lower()
+        self.density_bandwidth = float(getattr(configs, 'density_bandwidth', 15.0))
+        self.density_eps = float(getattr(configs, 'density_eps', 1e-8))
+        self.macro_aggregator = build_macro_aggregator(configs)
         self.tek = TEK(configs)
             
         self.enc_in = configs.enc_in
@@ -57,14 +60,11 @@ class HATEK(nn.Module):
         self.eps = 1e-5
         self.nn = self.tek
         self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
-        self.target_adapter = build_target_adapter(configs)
-        self.revin_adapter = build_revin_adapter(configs)
-        self.physical_injection = PhysicalInjectionModule(configs)
         self.reset_diagnostics()
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
         if self.training:
             return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                              enc_self_mask, dec_self_mask, dec_enc_mask)
@@ -74,141 +74,75 @@ class HATEK(nn.Module):
 
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None):
 
-        #print(np.shape(x_enc),np.shape(x_mark_enc)) # (B,L,N)
         x = x_dec[:, -self.configs.pred_len:, :].permute(0, 2, 1)
         if x.shape[-1] < self.patch_len:
             pad_len = self.patch_len - x.shape[-1]
             x = F.pad(x, (0, pad_len), mode='replicate')
         f_dim = -1 if self.configs.features in ['MS'] else 0
-        x=x[:,f_dim:,:]
-        cond_ts = x_enc#(B,L,N)
-        if self.configs.new_norm:
-            cond_ts = self.revin_adapter.forward_norm(cond_ts)
-            cond_ts = cond_ts.permute(0,2,1) #(B,N,L)
-            x, _ = self.target_adapter.normalize_training_future(
-                x_future=x,
-                x_history=cond_ts,
-                use_revin_norm=True,
-            )
-            B = np.shape(x)[0]
-            N = self.configs.enc_in
-            L1 = np.shape(cond_ts)[2]
-            L2 = np.shape(x)[2]
-            target_len = self.configs.pred_len
-            cond_ts = torch.reshape(cond_ts,(B*N,L1))
-            x = torch.reshape(x,(B*N,L2))
-            t = torch.randint(0, self.num_timesteps, size=[B*N//2,]).long().to(self.device)
-            t = torch.cat([t, self.num_timesteps-1-t], dim=0)
-            #print(t,t.shape)
-            noise = torch.randn_like(x)
-            x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
-            model_out= self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
-            model_out=torch.reshape(model_out,(B,N,target_len))
-            model_out = model_out.permute(0,2,1)
-            model_out=self.revin_adapter.forward_denorm(model_out)
-            model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
-            model_out = model_out.permute(0,2,1)
-            weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
-        else:
-            cond_ts = cond_ts.permute(0,2,1) #(B,N,L) 
-            mean_ = torch.mean(cond_ts, dim=-1,keepdims=True)
-            std_ = torch.std(cond_ts, dim=-1,keepdims=True)
-            cond_ts = (cond_ts-mean_)/(std_+0.00001)
-            x = (x-mean_)/(std_+0.00001)
-            B = np.shape(x)[0]
-            N = self.configs.enc_in
-            L1 = np.shape(cond_ts)[2]
-            L2 = np.shape(x)[2]
-            target_len = self.configs.pred_len
-            cond_ts = torch.reshape(cond_ts,(B*N,L1))
-            x = torch.reshape(x,(B*N,L2))
-            t = torch.randint(0, self.num_timesteps, size=[B*N//2,]).long().to(self.device)
-            t = torch.cat([t, self.num_timesteps-1-t], dim=0)
-            #print(t,t.shape)
-            noise = torch.randn_like(x)
-            x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
-            model_out = self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=x_enc, physical_injection=self.physical_injection)
-            model_out = torch.reshape(model_out,(B,N,target_len))
-            model_out = model_out*(std_+0.00001) + mean_
-            model_out = model_out.permute(0,2,1)
-            model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
-            model_out = model_out.permute(0,2,1)
-            weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0],model_out.shape[1],1)
-        return model_out,weight_tmp
+        x = x[:, f_dim:, :]
+        cond_ts = x_enc.permute(0, 2, 1)
+        mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
+        std_ = torch.std(cond_ts, dim=-1, keepdims=True)
+        cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
+        x = (x - mean_) / (std_ + 0.00001)
+        B = np.shape(x)[0]
+        N = self.configs.enc_in
+        L1 = np.shape(cond_ts)[2]
+        L2 = np.shape(x)[2]
+        target_len = self.configs.pred_len
+        cond_ts = torch.reshape(cond_ts, (B * N, L1))
+        x = torch.reshape(x, (B * N, L2))
+        t = torch.randint(0, self.num_timesteps, size=[B * N // 2,]).long().to(self.device)
+        t = torch.cat([t, self.num_timesteps - 1 - t], dim=0)
+        noise = torch.randn_like(x)
+        x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
+        model_out = self.nn(x_k, t, cond_ts, x_mark_enc)
+        model_out = torch.reshape(model_out, (B, N, target_len))
+        model_out = model_out * (std_ + 0.00001) + mean_
+        model_out = model_out.permute(0, 2, 1)
+        weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0], model_out.shape[1], 1)
+        return model_out, weight_tmp
 
     def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
 
-        history_for_trend = x_enc  # (B, T_hist, N) 原始尺度，供趋势感知聚合使用
-        x_future = x_dec[:,-self.configs.pred_len:,:].permute(0,2,1)
-        x_past = x_enc.permute(0,2,1)     
-        f_dim = -1 if self.configs.features in ['MS'] else 0
+        history_for_trend = x_enc
+        x_past = x_enc.permute(0, 2, 1)
         batchs, nF, nL = np.shape(x_past)[0], self.enc_in, self.pred_len
-        batchs = batchs*self.enc_in
+        batchs = batchs * self.enc_in
         if self.configs.features in ['MS']:
             nF = 1
         shape = [nF, nL]
         all_outs = []
         B = np.shape(x_past)[0]
         N = self.configs.enc_in
-        if self.configs.new_norm:
-            x_past = x_past.permute(0,2,1) #(B,L,N)
-            x_past = self.revin_adapter.forward_norm(x_past)
-            x_past = x_past.permute(0,2,1) #(B,N,L)
-            _, inference_stats = self.target_adapter.normalize_inference_history(
-                x_history=x_past,
-                use_revin_norm=True,
-            )
-        else:
-            x_past, inference_stats = self.target_adapter.normalize_inference_history(
-                x_history=x_past,
-                use_revin_norm=False,
-            )
-        x_past = torch.reshape(x_past,(B*N,-1))
-        x_past = x_past.to(self.betas.device)
+        mean_ = torch.mean(x_past, dim=-1, keepdims=True)
+        std_ = torch.std(x_past, dim=-1, keepdims=True)
+        x_past = (x_past - mean_) / (std_ + 0.00001)
+        x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         for i in range(sample_times):
             start_code = torch.randn((batchs, nL), device=self.betas.device)
-            diff_samples ,_= self.sampler.sample(S=self.configs.s_steps,
-                                             conditioning=x_past,
-                                             x_mark_enc=x_mark_enc,
-                                             raw_history=x_enc,
-                                             physical_injection=self.physical_injection,
-                                             batch_size=batchs,
-                                             shape=shape,
-                                             verbose=False,
-                                             unconditional_guidance_scale=1.0,
-                                             unconditional_conditioning=None,
-                                             eta=0.,
-                                             x_T=start_code)
-            diff_samples=torch.reshape(diff_samples,(B,N,-1))      
-            if self.configs.new_norm:
-                diff_samples = diff_samples.permute(0,2,1).to(self.device)
-                diff_samples = self.revin_adapter.forward_denorm(diff_samples)
-                diff_samples = diff_samples.permute(0,2,1)
-                diff_samples = self.target_adapter.denormalize_prediction(
-                    diff_samples,
-                    inference_stats,
-                    use_revin_norm=True,
-                )
-                diff_samples = diff_samples.permute(0,2,1)
-            else:
-                diff_samples = diff_samples.to(self.device)
-                diff_samples = self.target_adapter.denormalize_prediction(
-                    diff_samples,
-                    inference_stats,
-                    use_revin_norm=False,
-                )
-                diff_samples = diff_samples.permute(0,2,1)
-            diff_samples = self.physical_injection.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
+            diff_samples, _ = self.sampler.sample(
+                S=self.configs.s_steps,
+                conditioning=x_past,
+                x_mark_enc=x_mark_enc,
+                batch_size=batchs,
+                shape=shape,
+                verbose=False,
+                unconditional_guidance_scale=1.0,
+                unconditional_conditioning=None,
+                eta=0.,
+                x_T=start_code,
+            )
+            diff_samples = torch.reshape(diff_samples, (B, N, -1))
+            diff_samples = diff_samples * (std_ + 0.00001) + mean_
+            diff_samples = diff_samples.permute(0, 2, 1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
-        if self.configs.use_mom and sample_times>1:
-                outs = self.extract_consensus(all_outs)
-        else:
-                outs = all_outs.mean(0)
-        
+        outs = self._aggregate_samples(all_outs, history_context=history_for_trend)
+
         return outs,all_outs.permute(1,0,2,3)
 
     def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
@@ -262,6 +196,34 @@ class HATEK(nn.Module):
     def _consensus_mean(self, seq):
         return torch.sum(seq, dim=0) / seq.size(0)
 
+    def _aggregate_samples(self, all_outs: torch.Tensor, history_context: torch.Tensor | None = None) -> torch.Tensor:
+        if all_outs.size(0) <= 1:
+            return all_outs.mean(0)
+
+        mode = self.aggregation_mode
+        if mode == 'simple':
+            return all_outs.mean(0)
+        if mode == 'median':
+            return torch.median(all_outs, dim=0)[0]
+        if mode == 'mom':
+            return self.extract_consensus(all_outs)
+        if mode == 'density_lite':
+            return self._aggregate_density_lite(all_outs)
+        if self.macro_aggregator is not None and hasattr(self.macro_aggregator, 'aggregate_batch'):
+            return self.macro_aggregator.aggregate_batch(all_outs, history_context=history_context)
+
+        return all_outs.mean(0)
+
+    def _aggregate_density_lite(self, all_outs: torch.Tensor) -> torch.Tensor:
+        # all_outs: (S, B, H, N)
+        samples = all_outs.permute(1, 2, 3, 0)  # (B, H, N, S)
+        bandwidth = max(self.density_bandwidth, self.density_eps)
+        diff = (samples.unsqueeze(-1) - samples.unsqueeze(-2)) / bandwidth  # (B,H,N,S,S)
+        weights = torch.exp(-0.5 * diff.pow(2)).sum(dim=-1)  # (B,H,N,S)
+        denom = weights.sum(dim=-1, keepdim=True).clamp_min(self.density_eps)
+        pred = (weights * samples).sum(dim=-1, keepdim=True) / denom
+        return pred.squeeze(-1)
+
     def reset_diagnostics(self):
         self._diag_block_var = []
         self._diag_inter_dev = []
@@ -270,8 +232,6 @@ class HATEK(nn.Module):
         self._diag_inter_dev_map = []
         self._diag_mean_pred = []
         self._diag_median_pred = []
-        if hasattr(self, 'physical_injection') and hasattr(self.physical_injection, 'reset_eta_diagnostics'):
-            self.physical_injection.reset_eta_diagnostics()
 
     def _consensus_reduce(self, tensor):
         if self.n_blocks > tensor.size(0):

@@ -94,6 +94,36 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         flat = arr.reshape(-1, arr.shape[-1])
         return dataset.scaler.inverse_transform(flat).reshape(arr.shape)
 
+    def _load_checkpoint_compat(self, checkpoint_path):
+        state = torch.load(checkpoint_path, map_location=self.device)
+        model = self._core_model()
+        current_state = model.state_dict()
+        filtered_state = {}
+        skipped_missing_shape = []
+
+        for key, value in state.items():
+            if key not in current_state:
+                continue
+            if current_state[key].shape != value.shape:
+                skipped_missing_shape.append((key, tuple(value.shape), tuple(current_state[key].shape)))
+                continue
+            filtered_state[key] = value
+
+        missing_keys = [k for k in current_state.keys() if k not in filtered_state]
+        unexpected_keys = [k for k in state.keys() if k not in current_state]
+        load_msg = model.load_state_dict(filtered_state, strict=False)
+
+        print('[ckpt] loaded params: {}/{}'.format(len(filtered_state), len(current_state)))
+        print('[ckpt] missing keys: {}'.format(len(load_msg.missing_keys)))
+        print('[ckpt] unexpected keys ignored: {}'.format(len(unexpected_keys)))
+        print('[ckpt] shape-mismatch keys ignored: {}'.format(len(skipped_missing_shape)))
+        if load_msg.missing_keys:
+            print('[ckpt] first missing keys:', load_msg.missing_keys[:10])
+        if unexpected_keys:
+            print('[ckpt] first unexpected keys:', unexpected_keys[:10])
+        if skipped_missing_shape:
+            print('[ckpt] first shape mismatch:', skipped_missing_shape[:10])
+
     def _load_fujian30_meta(self, dataset):
         csv_path = os.path.join(self.args.root_path, self.args.data_path)
         df = pd.read_csv(csv_path, usecols=['time_slot', 'station_index', 'traffic_flow', 'is_holiday'])
@@ -120,6 +150,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(vali_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4] if len(batch) > 4 else None
+                batch_holiday = batch[5] if len(batch) > 5 else None
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -129,9 +160,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times)
+                    outputs, _ = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
                 else:
-                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -170,6 +201,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(train_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4].float().to(self.device) if len(batch) > 4 else None
+                batch_holiday = batch[5].float().to(self.device) if len(batch) > 5 else None
                 iter_count += 1
                 model_optim.zero_grad()
 
@@ -182,9 +214,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times)
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -232,8 +264,12 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         test_data, test_loader = self._get_data(flag='test')
 
         if test:
-            print('loading model')
-            self.model.load_state_dict(torch.load(os.path.join(self.args.checkpoints + setting, 'checkpoint.pth')))
+            if getattr(self.args, 'load_checkpoint', ''):
+                checkpoint_path = self.args.load_checkpoint
+            else:
+                checkpoint_path = os.path.join(self.args.checkpoints + setting, 'checkpoint.pth')
+            print('loading model from', checkpoint_path)
+            self._load_checkpoint_compat(checkpoint_path)
 
         core_model = self._core_model()
         if hasattr(core_model, 'reset_diagnostics'):
@@ -259,6 +295,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(test_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4] if len(batch) > 4 else None
+                batch_holiday = batch[5] if len(batch) > 5 else None
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -269,9 +306,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.vs_times)
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.vs_times, holiday_flag=batch_holiday)
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -447,42 +484,13 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             tpr_true_cg = float(np.mean((np.sign(s_hist[cg_mask]) == np.sign(s_true[cg_mask])) & (np.abs(s_hist[cg_mask]) > 1e-6))) if cg_mask.sum() > 0 else float('nan')
 
             eta_diag = None
-            if hasattr(core_model, 'physical_injection') and getattr(core_model.physical_injection, '_eta_history', None):
-                eta_diag = torch.cat(core_model.physical_injection._eta_history, dim=0).numpy()
-                eta_diag = eta_diag[:len(preds)] if len(eta_diag) >= len(preds) else eta_diag
-                print('[eta-diag] init={:.4f} mode={} train_enabled={}'.format(
-                    float(getattr(self.args, 'physical_residual_eta_init', 0.0)),
-                    getattr(self.args, 'physical_residual_mode', 'fixed'),
-                    bool(getattr(self.args, 'physical_residual_in_train', False))))
-                print('[eta-diag] mean={:.6f}, std={:.6f}, min={:.6f}, max={:.6f}'.format(
-                    float(eta_diag.mean()), float(eta_diag.std()), float(eta_diag.min()), float(eta_diag.max())))
-                print('[eta-diag] FF mean={:.6f}, CG mean={:.6f}'.format(
-                    float(eta_diag[ff_mask].mean()) if ff_mask.sum() > 0 else float('nan'),
-                    float(eta_diag[cg_mask].mean()) if cg_mask.sum() > 0 else float('nan')))
-                grad_history = getattr(core_model.physical_injection, '_eta_grad_history', None)
-                if grad_history:
-                    grad_keys = sorted({key for item in grad_history for key in item.keys()})
-                    grad_summary = {}
-                    for key in grad_keys:
-                        vals = [item[key] for item in grad_history if item.get(key) is not None]
-                        if vals:
-                            grad_summary[key] = float(np.mean(vals))
-                    if grad_summary:
-                        print('[eta-grad] mean grad norms:', grad_summary)
-                    else:
-                        print('[eta-grad] all gradients are None or empty')
 
             print('[mom-metrics] version={}'.format(mom_ver))
+            print('[agg] mode={}, sample_times={}'.format(getattr(self.args, 'aggregation_mode', 'mom' if getattr(self.args, 'use_mom', False) else 'simple'), getattr(self.args, 'sample_times', 1)))
             print('[mom-metrics] phase_mae: free={:.4f}, trans={:.4f}, cong={:.4f}'.format(ff_mae, tr_mae, cg_mae))
             print('[mom-metrics] holiday_mae: hol={:.4f}, nor={:.4f}, hol_cong={:.4f}, nor_cong={:.4f}'.format(hol_mae, nor_mae, hol_cg_mae, nor_cg_mae))
             print('[mom-metrics] tpr: all={:.4f}, cong={:.4f}, true_cong={:.4f}'.format(tpr_all, tpr_cg, tpr_true_cg))
-            print('[phase-e] sgfe: {:.4f}'.format(sgfe))
-            if hasattr(core_model, 'target_adapter') and hasattr(core_model.target_adapter, 'zeta'):
-                zeta_val = core_model.target_adapter.zeta.detach().float().cpu().item()
-                print('[phase-e] zeta: {:.6f}'.format(zeta_val))
-            if hasattr(core_model, 'revin_adapter') and hasattr(core_model.revin_adapter, 'eta'):
-                eta_val = core_model.revin_adapter.eta.detach().float().cpu().item()
-                print('[phase-e] field_eta: {:.6f}'.format(eta_val))
+            print('[diag] sgfe: {:.4f}'.format(sgfe))
 
             with open(os.path.join(diag_path, 'diagnostic_summary.json'), 'w', encoding='utf-8') as fp:
                 json.dump({
@@ -503,11 +511,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                     'mwu_holiday_pvalue': p_holiday,
                     'mwu_congested_pvalue': p_phase,
                     'sgfe': sgfe,
-                    'phase_e_enable': bool(getattr(self.args, 'phase_e_enable', False)),
-                    'phase_e_target_adapter': getattr(self.args, 'phase_e_target_adapter', 'vanilla_ni'),
-                    'phase_e_revin_adapter': getattr(self.args, 'phase_e_revin_adapter', 'vanilla_revin'),
-                    'phase_e_zeta_value': float(core_model.target_adapter.zeta.detach().float().cpu().item()) if hasattr(core_model, 'target_adapter') and hasattr(core_model.target_adapter, 'zeta') else None,
-                    'phase_e_field_eta_value': float(core_model.revin_adapter.eta.detach().float().cpu().item()) if hasattr(core_model, 'revin_adapter') and hasattr(core_model.revin_adapter, 'eta') else None,
+                    'aggregation_mode': getattr(self.args, 'aggregation_mode', 'mom' if getattr(self.args, 'use_mom', False) else 'simple'),
+                    'sample_times': int(getattr(self.args, 'sample_times', 1)),
                 }, fp, ensure_ascii=False, indent=2)
 
         return mae, mse, rmse

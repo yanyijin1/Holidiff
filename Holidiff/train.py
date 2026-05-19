@@ -36,6 +36,7 @@ def _build_parser():
     parser = argparse.ArgumentParser(description='HoliDiff YAML runner')
     parser.add_argument('--config', type=str, required=True, help='Path to yaml config')
     parser.add_argument('--version', type=str, default='', help='Short experiment version used in checkpoint/result naming')
+    parser.add_argument('--load_checkpoint', type=str, default='', help='Optional explicit checkpoint path for test-only runs')
     return parser
 
 
@@ -104,6 +105,7 @@ if __name__ == '__main__':
     _merge_args_from_yaml(parser, cfg)
     parser.add_argument('--config', type=str, default=base_args.config)
     parser.add_argument('--version', type=str, default=base_args.version)
+    parser.add_argument('--load_checkpoint', type=str, default=base_args.load_checkpoint)
     args = parser.parse_args()
 
     for k, v in cfg.items():

@@ -78,10 +78,7 @@ class DPMSolverSampler(object):
             guidance_type="classifier-free",
             condition=conditioning,
             x_mark_enc=x_mark_enc,
-            model_kwargs={
-                'raw_history': raw_history,
-                'physical_injection': physical_injection,
-            },
+            model_kwargs={},
             unconditional_condition=unconditional_conditioning,
             guidance_scale=unconditional_guidance_scale,
         )

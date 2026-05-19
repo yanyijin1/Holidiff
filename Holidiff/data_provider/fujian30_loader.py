@@ -213,9 +213,10 @@ class Fujian30CsvDataset(Dataset):
         x = torch.from_numpy(self.raw_data[s:e]).float()
         y = torch.from_numpy(self.raw_data[e:p]).float()
         y_mask = torch.from_numpy(self.raw_zero_mask[e:p]).float()
+        holiday_flag = torch.tensor(float(self.holiday_flag[e:p].sum() > 0), dtype=torch.float32)
         x_mark = torch.zeros(self.input_len, 1)
         y_mark = torch.zeros(self.input_len + self.pred_len, 1)
-        return x, y, x_mark, y_mark, y_mask
+        return x, y, x_mark, y_mark, y_mask, holiday_flag
 
 
 def get_dataloader(csv_path, adj_path, split, mode,

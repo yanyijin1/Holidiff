@@ -120,7 +120,7 @@ class STEKBackbone(nn.Module):
         ])
 
     def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None, raw_history=None, physical_injection=None, frequency_patch_embedding=None):
-        b, c, s = micro_realization.shape
+        b, c, _ = micro_realization.shape
         if hist_macro_state.shape[-1] < self.patch_len:
             hist_macro_state = torch.nn.functional.pad(hist_macro_state, (0, self.patch_len - hist_macro_state.shape[-1]), mode='replicate')
         if micro_realization.shape[-1] < self.patch_len:
@@ -149,13 +149,13 @@ class STEKBackbone(nn.Module):
             )
         b, c, t, h = inputs.shape
         skip = []
-        for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
+        for attention_layer, _, dropout_layer, _ in zip(self.Attentions_over_token, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
             output = attention_layer(inputs, **attn_kwargs)
             inputs = dropout_layer(output)
             skip.append(inputs)
         inputs = self.Attentions_over_token_mid(inputs, **attn_kwargs)
         inputs = self.Attentions_dropout_mid(inputs)
-        for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token_up, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
+        for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token_up, self.Attentions_mlp, self.Attentions_dropout_up, self.Attentions_norm):
             prev = skip.pop()
             outputs = dropout_layer(mlp(torch.cat((prev, inputs), dim=-1)))
             outputs = norm(outputs.reshape(b * c, t, -1)).reshape(b, c, t, -1)
