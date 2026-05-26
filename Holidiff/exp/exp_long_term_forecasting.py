@@ -201,6 +201,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(train_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4].float().to(self.device) if len(batch) > 4 else None
+                batch_holiday = batch[5].float().to(self.device) if len(batch) > 5 else None
                 iter_count += 1
                 model_optim.zero_grad()
 
@@ -213,9 +214,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times)
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -271,8 +272,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             self._load_checkpoint_compat(checkpoint_path)
 
         core_model = self._core_model()
-        if hasattr(core_model, 'reset_diagnostics'):
-            core_model.reset_diagnostics()
         if hasattr(core_model, '_mom_kwargs') and hasattr(test_data, 'scaler') and hasattr(test_data.scaler, 'mean'):
             core_model._mom_kwargs['scaler_mean'] = torch.tensor(test_data.scaler.mean, dtype=torch.float32).squeeze(0)
             core_model._mom_kwargs['scaler_std'] = torch.tensor(test_data.scaler.std, dtype=torch.float32).squeeze(0)
@@ -348,170 +347,5 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         f.write('\n')
         f.write('\n')
         f.close()
-
-        if self.args.data == 'fujian30':
-            preds_raw = self._inverse_transform(test_data, preds)
-            trues_raw = self._inverse_transform(test_data, trues)
-            if masks is not None:
-                sample_mae = np.divide((np.abs(preds_raw - trues_raw) * masks).sum(axis=(1, 2)),
-                                       np.maximum(masks.sum(axis=(1, 2)), 1))
-                node_mae = np.divide((np.abs(preds_raw - trues_raw) * masks).sum(axis=(0, 1)),
-                                      np.maximum(masks.sum(axis=(0, 1)), 1))
-                timestep_mae = np.divide((np.abs(preds_raw - trues_raw) * masks).sum(axis=(0, 2)),
-                                          np.maximum(masks.sum(axis=(0, 2)), 1))
-            else:
-                sample_mae = np.abs(preds_raw - trues_raw).mean(axis=(1, 2))
-                node_mae = np.abs(preds_raw - trues_raw).mean(axis=(0, 1))
-                timestep_mae = np.abs(preds_raw - trues_raw).mean(axis=(0, 2))
-            negative_ratio = (preds_raw < 0).mean(axis=(1, 2))
-
-            meta = self._load_fujian30_meta(test_data)
-            time_index = meta['time_index']
-            station_ids = meta['station_ids']
-            starts = meta['starts'][:len(preds)]
-            pred_starts = meta['pred_starts'][:len(preds)]
-            pred_ends = meta['pred_ends'][:len(preds)]
-            holiday_flag = meta['holiday_flag']
-            start_times = pd.to_datetime(time_index[pred_starts])
-            future_holiday = np.asarray([float(holiday_flag[s + self.args.seq_len:s + self.args.seq_len + self.args.pred_len].sum() > 0) for s in starts])
-            flow_mean_raw = trues_raw.mean(axis=(1, 2))
-            q33, q66 = np.percentile(flow_mean_raw, [33, 66])
-            phase = np.where(flow_mean_raw < q33, 'free_flow', np.where(flow_mean_raw > q66, 'congested', 'transition'))
-
-            diag_block_var = torch.cat(core_model._diag_block_var, dim=0).numpy() if getattr(core_model, '_diag_block_var', None) else np.zeros(len(preds), dtype=np.float32)
-            diag_inter_dev = torch.cat(core_model._diag_inter_dev, dim=0).numpy() if getattr(core_model, '_diag_inter_dev', None) else np.zeros(len(preds), dtype=np.float32)
-            diag_median_bias = torch.cat(core_model._diag_median_bias, dim=0).numpy() if getattr(core_model, '_diag_median_bias', None) else np.zeros(len(preds), dtype=np.float32)
-            diag_block_var = diag_block_var[:len(preds)] if len(diag_block_var) >= len(preds) else np.pad(diag_block_var, (0, len(preds) - len(diag_block_var)))
-            diag_inter_dev = diag_inter_dev[:len(preds)] if len(diag_inter_dev) >= len(preds) else np.pad(diag_inter_dev, (0, len(preds) - len(diag_inter_dev)))
-            diag_median_bias = diag_median_bias[:len(preds)] if len(diag_median_bias) >= len(preds) else np.pad(diag_median_bias, (0, len(preds) - len(diag_median_bias)))
-
-            sample_df = pd.DataFrame({
-                'sample_id': np.arange(len(preds)),
-                'window_start_index': starts,
-                'pred_start_index': pred_starts,
-                'pred_end_index': pred_ends,
-                'pred_start_time': start_times.astype(str),
-                'start_hour': start_times.hour.to_numpy(),
-                'is_holiday': future_holiday.astype(int),
-                'phase': phase,
-                'sample_mae': sample_mae,
-                'negative_ratio': negative_ratio,
-                'intra_var': diag_block_var,
-                'inter_dev': diag_inter_dev,
-                'median_bias': diag_median_bias,
-            })
-            sample_df.to_csv(os.path.join(diag_path, 'sample_mae.csv'), index=False)
-
-            pd.DataFrame({'station_index': station_ids, 'node_mae': node_mae}).sort_values('node_mae', ascending=False).to_csv(os.path.join(diag_path, 'node_mae_map.csv'), index=False)
-            timestep_df = pd.DataFrame({'timestep': np.arange(1, self.args.pred_len + 1), 'minutes_ahead': np.arange(1, self.args.pred_len + 1) * 15, 'timestep_mae': timestep_mae})
-            timestep_df.to_csv(os.path.join(diag_path, 'timestep_mae.csv'), index=False)
-
-            fig, ax = plt.subplots(figsize=(7, 4))
-            ax.plot(timestep_df['minutes_ahead'], timestep_df['timestep_mae'], marker='o')
-            ax.set_xlabel('minutes ahead')
-            ax.set_ylabel('timestep_mae')
-            ax.set_title('Fujian30 timestep MAE')
-            fig.tight_layout()
-            fig.savefig(os.path.join(diag_path, 'diag_timestep_mae.png'), dpi=200)
-            plt.close(fig)
-
-            holiday_df = sample_df[sample_df['is_holiday'] == 1]
-            normal_df = sample_df[sample_df['is_holiday'] == 0]
-            free_df = sample_df[sample_df['phase'] == 'free_flow']
-            congested_df = sample_df[sample_df['phase'] == 'congested']
-            rho_var_mae, p_var_mae = self._safe_spearman(sample_df['intra_var'], sample_df['sample_mae'])
-            rho_inter_mae, p_inter_mae = self._safe_spearman(sample_df['inter_dev'], sample_df['sample_mae'])
-            rho_bias_mae, p_bias_mae = self._safe_spearman(sample_df['median_bias'], sample_df['sample_mae'])
-            _, p_holiday = self._safe_mwu(holiday_df['sample_mae'], normal_df['sample_mae'], alternative='greater')
-            _, p_phase = self._safe_mwu(congested_df['sample_mae'], free_df['sample_mae'], alternative='greater')
-
-            print('[diag] batch_y_mark shape:', marks.shape)
-            print('[diag] batch_y_mark unique example:', np.unique(marks)[:10])
-            print('[diag] batch_y_mark all zero:', bool(np.allclose(marks, 0)))
-            print('[diag] negative prediction ratio mean:', float(negative_ratio.mean()))
-            print('[diag] Spearman(intra_var, sample_mae): {:.4f}, p={:.4e}'.format(rho_var_mae, p_var_mae))
-            print('[diag] Spearman(inter_dev, sample_mae): {:.4f}, p={:.4e}'.format(rho_inter_mae, p_inter_mae))
-            print('[diag] Spearman(median_bias, sample_mae): {:.4f}, p={:.4e}'.format(rho_bias_mae, p_bias_mae))
-            print('[diag] holiday vs normal MAE: {:.4f} vs {:.4f}, MWU p={:.4e}'.format(float(holiday_df['sample_mae'].mean()) if len(holiday_df) else float('nan'), float(normal_df['sample_mae'].mean()) if len(normal_df) else float('nan'), p_holiday))
-            print('[diag] free_flow vs congested MAE: {:.4f} vs {:.4f}, MWU p={:.4e}'.format(float(free_df['sample_mae'].mean()) if len(free_df) else float('nan'), float(congested_df['sample_mae'].mean()) if len(congested_df) else float('nan'), p_phase))
-
-            # ── MoM 拆解指标 ──
-            mom_ver = getattr(self.args, 'mom_version', 'baseline')
-            ff_mask = (phase == 'free_flow')
-            tr_mask = (phase == 'transition')
-            cg_mask = (phase == 'congested')
-            hol_mask = (future_holiday > 0)
-
-            ff_mae = float(sample_mae[ff_mask].mean()) if ff_mask.sum() > 0 else float('nan')
-            tr_mae = float(sample_mae[tr_mask].mean()) if tr_mask.sum() > 0 else float('nan')
-            cg_mae = float(sample_mae[cg_mask].mean()) if cg_mask.sum() > 0 else float('nan')
-            hol_mae = float(sample_mae[hol_mask].mean()) if hol_mask.sum() > 0 else float('nan')
-            nor_mae = float(sample_mae[~hol_mask].mean()) if (~hol_mask).sum() > 0 else float('nan')
-            hol_cg_mask = hol_mask & cg_mask
-            nor_cg_mask = (~hol_mask) & cg_mask
-            hol_cg_mae = float(sample_mae[hol_cg_mask].mean()) if hol_cg_mask.sum() > 0 else float('nan')
-            nor_cg_mae = float(sample_mae[nor_cg_mask].mean()) if nor_cg_mask.sum() > 0 else float('nan')
-
-            adj_path = os.path.join(self.args.root_path, 'adjacent_gantry.csv')
-            if os.path.exists(adj_path):
-                adj_df = pd.read_csv(adj_path)
-                if {'src_FID', 'nbr_FID'}.issubset(adj_df.columns):
-                    nodes = sorted(set(adj_df['src_FID'].astype(int)).union(set(adj_df['nbr_FID'].astype(int))))
-                    node_to_idx = {nid: i for i, nid in enumerate(nodes)}
-                    adj = np.zeros((len(nodes), len(nodes)), dtype=np.float32)
-                    for _, row in adj_df.iterrows():
-                        adj[node_to_idx[int(row['src_FID'])], node_to_idx[int(row['nbr_FID'])]] = 1.0
-                else:
-                    adj = adj_df.values.astype(np.float32)
-            else:
-                adj = np.eye(preds_raw.shape[-1], dtype=np.float32)
-            edge_pairs = np.argwhere(adj > 0)
-            if len(edge_pairs) > 0:
-                pred_edge = np.stack([preds_raw[:, :, j] - preds_raw[:, :, i] for i, j in edge_pairs], axis=-1)
-                true_edge = np.stack([trues_raw[:, :, j] - trues_raw[:, :, i] for i, j in edge_pairs], axis=-1)
-                sgfe = float(np.mean(np.abs(pred_edge - true_edge)))
-            else:
-                sgfe = float('nan')
-
-            # TPR: 趋势保留率
-            hist_raw = self._inverse_transform(test_data, histories) if hasattr(self, '_inverse_transform') else histories
-            s_hist = hist_raw[:, -1, :] - hist_raw[:, 0, :]
-            s_pred = preds_raw[:, -1, :] - preds_raw[:, 0, :]
-            s_true = trues_raw[:, -1, :] - trues_raw[:, 0, :]
-            tpr_all = float(np.mean((np.sign(s_hist) == np.sign(s_pred)) & (np.abs(s_hist) > 1e-6)))
-            tpr_cg = float(np.mean((np.sign(s_hist[cg_mask]) == np.sign(s_pred[cg_mask])) & (np.abs(s_hist[cg_mask]) > 1e-6))) if cg_mask.sum() > 0 else float('nan')
-            tpr_true_cg = float(np.mean((np.sign(s_hist[cg_mask]) == np.sign(s_true[cg_mask])) & (np.abs(s_hist[cg_mask]) > 1e-6))) if cg_mask.sum() > 0 else float('nan')
-
-            eta_diag = None
-
-            print('[mom-metrics] version={}'.format(mom_ver))
-            print('[agg] mode={}, sample_times={}'.format(getattr(self.args, 'aggregation_mode', 'mom' if getattr(self.args, 'use_mom', False) else 'simple'), getattr(self.args, 'sample_times', 1)))
-            print('[mom-metrics] phase_mae: free={:.4f}, trans={:.4f}, cong={:.4f}'.format(ff_mae, tr_mae, cg_mae))
-            print('[mom-metrics] holiday_mae: hol={:.4f}, nor={:.4f}, hol_cong={:.4f}, nor_cong={:.4f}'.format(hol_mae, nor_mae, hol_cg_mae, nor_cg_mae))
-            print('[mom-metrics] tpr: all={:.4f}, cong={:.4f}, true_cong={:.4f}'.format(tpr_all, tpr_cg, tpr_true_cg))
-            print('[diag] sgfe: {:.4f}'.format(sgfe))
-
-            with open(os.path.join(diag_path, 'diagnostic_summary.json'), 'w', encoding='utf-8') as fp:
-                json.dump({
-                    'setting': setting,
-                    'mask_enabled': masks is not None,
-                    'mask_valid_ratio': float(masks.mean()) if masks is not None else 1.0,
-                    'mask_zero_count': int((masks == 0).sum()) if masks is not None else 0,
-                    'batch_y_mark_shape': list(marks.shape),
-                    'batch_y_mark_all_zero': bool(np.allclose(marks, 0)),
-                    'mark_column_note': 'Fujian30CsvDataset returns zero placeholder marks; holiday/hour are reconstructed from CSV timeline.',
-                    'spearman_intra_mae': rho_var_mae,
-                    'spearman_inter_mae': rho_inter_mae,
-                    'spearman_bias_mae': rho_bias_mae,
-                    'holiday_mae_mean': float(holiday_df['sample_mae'].mean()) if len(holiday_df) else None,
-                    'normal_mae_mean': float(normal_df['sample_mae'].mean()) if len(normal_df) else None,
-                    'free_flow_mae_mean': float(free_df['sample_mae'].mean()) if len(free_df) else None,
-                    'congested_mae_mean': float(congested_df['sample_mae'].mean()) if len(congested_df) else None,
-                    'mwu_holiday_pvalue': p_holiday,
-                    'mwu_congested_pvalue': p_phase,
-                    'sgfe': sgfe,
-                    'aggregation_mode': getattr(self.args, 'aggregation_mode', 'mom' if getattr(self.args, 'use_mom', False) else 'simple'),
-                    'sample_times': int(getattr(self.args, 'sample_times', 1)),
-                }, fp, ensure_ascii=False, indent=2)
 
         return mae, mse, rmse

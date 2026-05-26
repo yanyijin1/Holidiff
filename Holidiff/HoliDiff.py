@@ -1,16 +1,4 @@
     
-"""
-HoliDiff: Holiday-Aware Traffic Diffusion Model
-
-Paper final version with fixed architecture:
-- LSTDE (Fixed FFT, K=4, patch_len=12)
-- Trend-Aware PatchEmbed (concat)
-- SFCN (learnable α)
-- Diffusion Denoiser
-- Hybrid Residual (η=0.5)
-- DCA Aggregator
-"""
-
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -18,7 +6,7 @@ from functools import partial
 import torch.nn as nn
 from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
-from Holidiff.macro.dca_aggregator import DensityCentroidAggregator
+from Holidiff.macro.aggregation_factory import build_macro_aggregator
 from Holidiff.utils.diffusion_utils import *
 
 
@@ -37,16 +25,6 @@ def cosine_beta_schedule(timesteps, s=5):
 
 
 class HATEK(nn.Module):
-    """
-    HoliDiff main model (paper final version).
-    
-    Architecture:
-        1. History encoding with LSTDE + Trend-Aware PatchEmbed
-        2. SFCN for spatial field coupling
-        3. Diffusion-based micro-realization generation
-        4. Hybrid residual correction
-        5. DCA for macro-flow estimation
-    """
     
     def __init__(self, configs):
         super(HATEK, self).__init__()
@@ -56,14 +34,16 @@ class HATEK(nn.Module):
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.diff_steps = configs.diff_steps
-        self.stride = configs.stride
-        self.patch_len = configs.patch_len
-        self.d_model = configs.d_model
-        self.e_layers = configs.e_layers
-        self.num_heads = configs.num_heads
-        
+        self.stride=configs.stride
+        self.patch_len=configs.patch_len
+        self.d_model=configs.d_model
+        self.e_layers=configs.e_layers
+        self.num_heads=configs.num_heads
+        self.rmom_n = configs.rmom
+        self.n_blocks = configs.n_b
+        self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
+        self.macro_aggregator = build_macro_aggregator(configs)
         self.tek = TEK(configs)
-        self.aggregator = DensityCentroidAggregator(configs)
             
         self.enc_in = configs.enc_in
         self.batch_size =configs.batch_size
@@ -77,36 +57,21 @@ class HATEK(nn.Module):
         self.T = 1.
         self.eps = 1e-5
         self.nn = self.tek
-        self.sampler = DPMSolverSampler(configs, self.nn, self.device, self.alphas_cumprod, self.betas.device)
+        self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
-        """
-        Forward pass.
-        
-        Args:
-            x_enc: Historical traffic flow [B, L, N]
-            x_mark_enc: Time marks for history
-            x_dec: Future initialization (for training)
-            x_mark_dec: Time marks for future
-            sample_times: Number of micro-realizations to generate (inference only)
-        
-        Returns:
-            Training: (prediction, weight)
-            Inference: (macro_prediction, all_samples)
-        """
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
         if self.training:
             return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                              enc_self_mask, dec_self_mask, dec_enc_mask)
         else:
-            return self.forward_macro_estimation_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
+            return self.forward_consensus_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                             enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
 
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
-        """Micro-realization generation (training phase)."""
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None):
 
         x = x_dec[:, -self.configs.pred_len:, :].permute(0, 2, 1)
         if x.shape[-1] < self.patch_len:
@@ -133,17 +98,13 @@ class HATEK(nn.Module):
         model_out = self.nn(x_k, t, cond_ts, x_mark_enc)
         model_out = torch.reshape(model_out, (B, N, target_len))
         model_out = model_out * (std_ + 0.00001) + mean_
+        weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, N, 1)
         model_out = model_out.permute(0, 2, 1)
-        weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0], model_out.shape[1], 1)
         return model_out, weight_tmp
 
-    def forward_macro_estimation_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
-        """
-        Macro-flow estimation (inference phase).
-        
-        Generates multiple micro-realizations and aggregates them using DCA.
-        """
+    def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
+
         history_for_trend = x_enc
         x_past = x_enc.permute(0, 2, 1)
         batchs, nF, nL = np.shape(x_past)[0], self.enc_in, self.pred_len
@@ -156,6 +117,8 @@ class HATEK(nn.Module):
         N = self.configs.enc_in
         mean_ = torch.mean(x_past, dim=-1, keepdims=True)
         std_ = torch.std(x_past, dim=-1, keepdims=True)
+        mean_ = mean_.to(self.betas.device)
+        std_ = std_.to(self.betas.device)
         x_past = (x_past - mean_) / (std_ + 0.00001)
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         for i in range(sample_times):
@@ -172,14 +135,15 @@ class HATEK(nn.Module):
                 eta=0.,
                 x_T=start_code,
             )
+            diff_samples = diff_samples.to(self.betas.device)
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
             diff_samples = diff_samples * (std_ + 0.00001) + mean_
             diff_samples = diff_samples.permute(0, 2, 1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
-        macro_prediction = self.aggregator.aggregate_batch(all_outs, history_context=history_for_trend)
+        outs = self._aggregate_samples(all_outs, history_context=history_for_trend)
 
-        return macro_prediction, all_outs.permute(1, 0, 2, 3)
+        return outs,all_outs.permute(1,0,2,3)
 
     def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
     ):  
@@ -224,8 +188,56 @@ class HATEK(nn.Module):
         assert not torch.isnan(self.lvlb_weights).all() 
 
     def generate_micro_realization(self, x_start, t, noise=None):
-        """Generate noisy micro-realization at diffusion step t."""
+
         noise = default(noise, lambda: self.scaling_noise * torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
+    
+    def _consensus_mean(self, seq):
+        return torch.sum(seq, dim=0) / seq.size(0)
+
+    def _aggregate_samples(self, all_outs: torch.Tensor, history_context: torch.Tensor | None = None) -> torch.Tensor:
+        if all_outs.size(0) <= 1:
+            return all_outs.mean(0)
+
+        mode = self.aggregation_mode
+        if mode == 'simple':
+            return all_outs.mean(0)
+        if mode == 'median':
+            return torch.median(all_outs, dim=0)[0]
+        if mode == 'mom':
+            return self.extract_consensus(all_outs)
+        if self.macro_aggregator is not None and hasattr(self.macro_aggregator, 'aggregate_batch'):
+            return self.macro_aggregator.aggregate_batch(all_outs, history_context=history_context)
+
+        return all_outs.mean(0)
+
+    def _consensus_reduce(self, tensor):
+        if self.n_blocks > tensor.size(0):
+            self.n_blocks = int(torch.ceil(tensor.size(0) / 2))
+
+        indic = torch.randperm(tensor.size(0))
+        tensor = tensor[indic]
+        block_size = tensor.size(0) // self.n_blocks
+
+        means = []
+        for i in range(self.n_blocks):
+            start_index = i * block_size
+            end_index = start_index + block_size if (i + 1) < self.n_blocks else tensor.size(0)
+            block = tensor[start_index:end_index]
+            block_mean = self._consensus_mean(block)
+            means.append(block_mean)
+
+        means = torch.stack(means)
+        return torch.median(means, dim=0)[0]
+
+    def extract_consensus(self, outputs):
+        results = []
+        for _ in range(self.rmom_n):
+            shuffled_outputs = outputs[torch.randperm(outputs.size(0))]
+            result = self._consensus_reduce(shuffled_outputs)
+            results.append(result)
+        results = torch.stack(results)
+
+        return torch.median(results, dim=0)[0]
 

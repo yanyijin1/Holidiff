@@ -59,7 +59,6 @@ class TCPAttention(nn.Module):
         self.rotary_emb = RotaryEmbedding(dim=self.head_dim // 2)
 
     def forward(self, src, *configs, **kwargs):
-        attn_bias = kwargs.get('attn_bias')
         B, nvars, H, C = src.shape
         qkv = self.qkv(src).reshape(B, nvars, H, 3, self.num_heads, C // self.num_heads).permute(3, 0, 1, 4, 2, 5)
         q = qkv[0].reshape(B * nvars, self.num_heads, -1, self.head_dim)
@@ -67,20 +66,12 @@ class TCPAttention(nn.Module):
         v = qkv[2].reshape(B * nvars, self.num_heads, -1, self.head_dim)
         q = self.rotary_emb.rotate_queries_or_keys(q)
         k = self.rotary_emb.rotate_queries_or_keys(k)
-        if attn_bias is not None:
-            scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-            bias = attn_bias.to(device=scores.device, dtype=scores.dtype).reshape(B * nvars, 1, H, H)
-            scores = scores + bias
-            attn = torch.softmax(scores, dim=-1)
-            attn = self.attn_dropout(attn)
-            x = torch.matmul(attn, v)
-        else:
-            x = torch.nn.functional.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                dropout_p=self.attn_dropout.p if self.training else 0.0,
-            )
+        x = torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+        )
         output1 = rearrange(x, '(b n) h e d -> b n e (h d)', b=B)
         src2 = self.ff_1(output1)
         src = src + src2
@@ -138,28 +129,19 @@ class STEKBackbone(nn.Module):
         time_token = self.cls(timesteps.float())
         state_embeddings = torch.cat((time_token, state_embeddings), dim=-2)
         inputs = state_embeddings
-        attn_kwargs = {}
-        if physical_injection is not None:
-            attn_kwargs = physical_injection.attention_kwargs(
-                raw_history,
-                inputs.size(-2),
-                inputs.device,
-                inputs.dtype,
-                state_start_idx=1,
-            )
         b, c, t, h = inputs.shape
         skip = []
         for attention_layer, _, dropout_layer, _ in zip(self.Attentions_over_token, self.Attentions_mlp, self.Attentions_dropout, self.Attentions_norm):
-            output = attention_layer(inputs, **attn_kwargs)
+            output = attention_layer(inputs)
             inputs = dropout_layer(output)
             skip.append(inputs)
-        inputs = self.Attentions_over_token_mid(inputs, **attn_kwargs)
+        inputs = self.Attentions_over_token_mid(inputs)
         inputs = self.Attentions_dropout_mid(inputs)
         for attention_layer, mlp, dropout_layer, norm in zip(self.Attentions_over_token_up, self.Attentions_mlp, self.Attentions_dropout_up, self.Attentions_norm):
             prev = skip.pop()
             outputs = dropout_layer(mlp(torch.cat((prev, inputs), dim=-1)))
             outputs = norm(outputs.reshape(b * c, t, -1)).reshape(b, c, t, -1)
-            output = attention_layer(inputs, **attn_kwargs)
+            output = attention_layer(inputs)
             inputs = dropout_layer(output)
         flat = inputs[:, :, :, :].reshape(b, c, -1)
         target_in = self.W_outs.in_features

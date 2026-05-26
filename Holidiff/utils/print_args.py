@@ -53,9 +53,9 @@ def print_args(args):
     print(f'  {"Physical Injection:":<20}{args.physical_injection_enable:<20}{"Physical Residual:":<20}{args.physical_residual_enable:<20}')
     print(f'  {"Residual Eta:":<20}{args.physical_residual_eta:<20}{"FreeFlow Eps:":<20}{args.physical_free_flow_epsilon:<20}')
     if hasattr(args, 'frequency_enable'):
-        print(f'  {"Frequency Enable:":<20}{args.frequency_enable:<20}{"Freq Decomp:":<20}{args.frequency_decomp_type:<20}')
-        print(f'  {"Freq Residual:":<20}{args.frequency_residual_type:<20}{"Num Bands:":<20}{args.frequency_num_bands:<20}')
-        print(f'  {"Freq Inject:":<20}{args.frequency_injection_mode:<20}{"Hybrid Mix:":<20}{args.frequency_hybrid_mix_alpha:<20}')
+        print(f'  {"Frequency Enable:":<20}{args.frequency_enable:<20}{"Freq Decomp:":<20}{"fixed_fft":<20}')
+        print(f'  {"Freq Residual:":<20}{"hybrid_residual":<20}{"Num Bands:":<20}{args.frequency_num_bands:<20}')
+        print(f'  {"Freq Inject:":<20}{"embed_replace":<20}{"Hybrid Mix:":<20}{args.frequency_hybrid_mix_alpha:<20}')
         if hasattr(args, 'frequency_conditioner_mode'):
             print(f'  {"Freq Cond Mode:":<20}{args.frequency_conditioner_mode:<20}{"Cond Dim:":<20}{args.frequency_conditioner_dim:<20}')
     print()

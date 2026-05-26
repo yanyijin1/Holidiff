@@ -6,13 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .decompose import IdentityDecomposer
 from .utils import build_horizon_steps, compute_time_slope
-
-
-class IdentityResidualModule(nn.Module):
-    def apply_output_residual(self, pred, raw_history, is_training=False, x_mark_enc=None):
-        return pred
 
 
 class TimeResidualModule(nn.Module):
@@ -35,7 +29,7 @@ class TimeResidualModule(nn.Module):
 class FrequencyResidualModule(nn.Module):
     def __init__(
         self,
-        decomposer: Optional[nn.Module] = None,
+        decomposer: nn.Module,
         eta_init: Optional[List[float]] = None,
         beta_init: Optional[List[float]] = None,
         use_learnable_beta: bool = False,
@@ -44,7 +38,7 @@ class FrequencyResidualModule(nn.Module):
         enc_in: Optional[int] = None,
     ):
         super().__init__()
-        self.decomposer = decomposer if decomposer is not None else IdentityDecomposer()
+        self.decomposer = decomposer
         eta_init = eta_init or [0.2, 0.5, 1.0, 1.2]
         beta_init = beta_init or [0.15, 0.2, 0.3, 0.35]
         self.use_softplus_eta = use_softplus_eta

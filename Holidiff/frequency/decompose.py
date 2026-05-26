@@ -8,11 +8,6 @@ import torch.nn as nn
 from .utils import to_bnt
 
 
-class IdentityDecomposer(nn.Module):
-    def forward(self, raw_history: torch.Tensor, enc_in: Optional[int] = None) -> List[torch.Tensor]:
-        return [to_bnt(raw_history, enc_in=enc_in)]
-
-
 class FixedBandDecomposer(nn.Module):
     def __init__(self, seq_len: int, num_bands: int = 4):
         super().__init__()

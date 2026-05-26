@@ -9,11 +9,6 @@ from .decompose import FixedBandDecomposer
 from .utils import to_bnt
 
 
-class IdentityPatchEmbed(nn.Module):
-    def forward(self, patch_tokens: Optional[torch.Tensor] = None, raw_history: Optional[torch.Tensor] = None, enc_in: Optional[int] = None):
-        return None
-
-
 class BandSpecificTrendAwarePatchEmbed(nn.Module):
     def __init__(
         self,
@@ -21,7 +16,6 @@ class BandSpecificTrendAwarePatchEmbed(nn.Module):
         patch_len: int,
         d_model: int,
         num_bands: int = 4,
-        decomp_type: str = 'fixed_fft',
         fusion_type: str = 'concat_proj',
         enc_in: Optional[int] = None,
     ):
