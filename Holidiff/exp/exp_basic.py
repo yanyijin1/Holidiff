@@ -1,6 +1,9 @@
 import os
 import torch
 from Holidiff.HoliDiff import HATEK
+from Holidiff.baselines.diffusion_ts_adapter import DiffusionTSAdapter
+from Holidiff.baselines.mgtsd_adapter import MGTSDAdapter
+from Holidiff.baselines.tsdiff_adapter import TSDiffAdapter
 
 
 class Exp_Basic(object):
@@ -8,6 +11,9 @@ class Exp_Basic(object):
         self.args = args
         self.model_dict = {
             'HATEK': HATEK,
+            'DiffusionTS': DiffusionTSAdapter,
+            'TSDiff': TSDiffAdapter,
+            'MGTSD': MGTSDAdapter,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

@@ -102,7 +102,7 @@ class HATEK(nn.Module):
         model_out = torch.reshape(model_out, (B, N, target_len))
         model_out = model_out * (std_ + 0.00001) + mean_
         model_out = model_out.permute(0, 2, 1)
-        weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0], model_out.shape[1], 1)
+        weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(model_out.shape[0], 1, model_out.shape[2])
         return model_out, weight_tmp
 
     def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
@@ -137,7 +137,7 @@ class HATEK(nn.Module):
                 x_T=start_code,
             )
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
-            diff_samples = diff_samples * (std_ + 0.00001) + mean_
+            diff_samples = diff_samples * (std_.to(diff_samples.device) + 0.00001) + mean_.to(diff_samples.device)
             diff_samples = diff_samples.permute(0, 2, 1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)

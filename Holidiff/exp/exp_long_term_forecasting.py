@@ -213,15 +213,19 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-                if self.args.is_diff:
+                core_model = self._core_model()
+                if hasattr(core_model, 'training_loss'):
+                    loss = core_model.training_loss(batch_x, batch_y, batch_y_mask)
+                elif self.args.is_diff:
                     outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
+                    outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
+                    batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
+                    loss = self._masked_loss(outputs, batch_y, batch_y_mask, self.args.loss_type)
                 else:
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
-
-                outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
-                batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
-
-                loss = self._masked_loss(outputs, batch_y, batch_y_mask, self.args.loss_type)
+                    outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
+                    batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
+                    loss = self._masked_loss(outputs, batch_y, batch_y_mask, self.args.loss_type)
                 if epoch == 0 and i == 0 and batch_y_mask is not None:
                     print('\t[mask] valid ratio: {:.4f}, zero elements: {}/{} (first batch)'.format(
                         batch_y_mask.mean().item(), int((batch_y_mask == 0).sum().item()), batch_y_mask.numel()))
@@ -240,6 +244,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 if physical_module is not None and hasattr(physical_module, 'record_eta_gradients'):
                     physical_module.record_eta_gradients()
                 model_optim.step()
+                if hasattr(core_model, 'after_optimizer_step'):
+                    core_model.after_optimizer_step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)

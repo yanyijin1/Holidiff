@@ -1,7 +1,7 @@
 task_name: long_term_forecast
 is_training: 1
-model_id: Fujian30_96_12
-model: HATEK
+model_id: Fujian30_96_12_TSDiff
+model: TSDiff
 
 data: fujian30
 root_path: C:/Project/YYJ/Holidiff/Holidiff/data/fujian-30
@@ -34,7 +34,7 @@ moving_avg: 25
 factor: 1
 distil: true
 dropout: 0.0
-skip_dropout: 0.4
+skip_dropout: 0.0
 embed: timeF
 activation: gelu
 channel_independence: 1
@@ -47,20 +47,45 @@ seg_len: 48
 stride: 1
 patch_len: 12
 patch_embed_mode: trend_aware_concat
-coss: 5.0
-rmom: 5
-n_b: 5
-sample_times: 20
-vs_times: 10
+
+# Keep host validation/test in diffusion-output mode.
 is_diff: 1
-s_steps: 2
-skip_type: time_quadratic
+loss_type: MAE
+
+# TSDiff baseline parameters. Training preserves the paper's unconditional
+# DDPM noise-prediction objective; forecasting uses observation self-guidance.
+tsdiff_seq_length: 108
+tsdiff_timesteps: 1000
+tsdiff_beta_schedule: cosine
+tsdiff_hidden_dim: 128
+tsdiff_step_emb: 128
+tsdiff_num_residual_blocks: 4
+tsdiff_dropout: 0.0
+tsdiff_init_skip: true
+tsdiff_sampling_steps: 20
+tsdiff_skip_type: uniform
+tsdiff_eta: 0.0
+tsdiff_guidance_scale: 0.05
+tsdiff_guidance_clip: 10.0
+tsdiff_use_ema: true
+tsdiff_ema_decay: 0.995
+tsdiff_ema_update_every: 10
+
+sample_times: 1
+vs_times: 1
+
+# HATEK-only compatibility keys required by parser/printing.
+coss: 0.008
+rmom: 1
+n_b: 1
+s_steps: 20
+skip_type: time_uniform
 method: multistep
 lower_order_final: true
 order: 2
-diff_steps: 100
-use_mom: 1
-aggregation_mode: mom
+diff_steps: 1000
+use_mom: 0
+aggregation_mode: simple
 density_bandwidth: 15.0
 density_eps: 1.0e-8
 dca_bandwidth_kde: 15.0
@@ -72,29 +97,29 @@ abms_tol: 0.001
 rcl_bandwidth_hist: 20.0
 rcl_mode: soft
 scp_lambda_skew: 0.5
-mom_version: "baseline"
+mom_version: baseline
 mom_alpha: 0.4
 mom_topk: 3
 mom_trend_temp: 5.0
 mom_lambda: 0.7
-physical_injection_enable: true
-physical_residual_enable: true
-physical_residual_eta: 0.5
+physical_injection_enable: false
+physical_residual_enable: false
+physical_residual_eta: 0.0
 physical_free_flow_epsilon: 0.0
-frequency_enable: true
+frequency_enable: false
 frequency_decomp_type: fixed_fft
 frequency_num_bands: 4
 frequency_patch_embed_mode: band_trend
 frequency_patch_embed_fusion: concat_proj
 frequency_patch_embed_num_bands: 4
-frequency_injection_mode: embed_replace
-frequency_residual_type: hybrid_residual
+frequency_injection_mode: none
+frequency_residual_type: none
 frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
-phase_e_enable: true
-phase_e_target_adapter: matrix_ni
+phase_e_enable: false
+phase_e_target_adapter: vanilla_ni
 phase_e_revin_adapter: vanilla_revin
 phase_e_graph_mode: directed
 phase_e_adj_file: adjacent_gantry.csv
@@ -119,9 +144,8 @@ train_epochs: 1
 batch_size: 32
 patience: 10
 learning_rate: 0.0001
-des: Exp
+des: TSDiff
 loss: MSE
-loss_type: MAE
 lradj: type1
 use_amp: false
 
