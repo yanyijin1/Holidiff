@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from .decompose import FixedBandDecomposer
-from .patch_embed import BandSpecificTrendAwarePatchEmbed
 from .residual import (
     FrequencyResidualModule,
     HybridResidualModule,
     TimeResidualModule,
 )
+from .spec import BandSpecificTrendAwarePatchEmbed, FixedBandDecomposer
 
 
 def build_frequency_decomposer(configs):

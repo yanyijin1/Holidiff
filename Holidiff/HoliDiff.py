@@ -6,7 +6,7 @@ from functools import partial
 import torch.nn as nn
 from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
-from Holidiff.macro.aggregation_factory import build_macro_aggregator
+from Holidiff.macro.agg import build_macro_aggregator
 from Holidiff.utils.diffusion_utils import *
 
 
@@ -61,7 +61,7 @@ class HATEK(nn.Module):
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
         if self.training:
             return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                              enc_self_mask, dec_self_mask, dec_enc_mask)
@@ -71,7 +71,7 @@ class HATEK(nn.Module):
 
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
 
         x = x_dec[:, -self.configs.pred_len:, :].permute(0, 2, 1)
         if x.shape[-1] < self.patch_len:
@@ -103,7 +103,7 @@ class HATEK(nn.Module):
         return model_out, weight_tmp
 
     def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5):
 
         history_for_trend = x_enc
         x_past = x_enc.permute(0, 2, 1)

@@ -150,7 +150,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(vali_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4] if len(batch) > 4 else None
-                batch_holiday = batch[5] if len(batch) > 5 else None
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -160,9 +159,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
+                    outputs, _ = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times)
                 else:
-                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -201,7 +200,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(train_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4].float().to(self.device) if len(batch) > 4 else None
-                batch_holiday = batch[5].float().to(self.device) if len(batch) > 5 else None
                 iter_count += 1
                 model_optim.zero_grad()
 
@@ -214,9 +212,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times)
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -293,7 +291,6 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             for i, batch in enumerate(test_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
                 batch_y_mask = batch[4] if len(batch) > 4 else None
-                batch_holiday = batch[5] if len(batch) > 5 else None
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -304,9 +301,9 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.vs_times, holiday_flag=batch_holiday)
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.vs_times)
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)

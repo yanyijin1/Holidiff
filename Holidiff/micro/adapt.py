@@ -1,11 +1,45 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, Tuple
 
+import pandas as pd
 import torch
 import torch.nn as nn
 
 from Holidiff.layers.RevIN import RevIN
+
+
+class FieldStatsProvider:
+    def __init__(self, root_path: str, enc_in: int, adj_file: str):
+        self.root_path = Path(root_path)
+        self.enc_in = enc_in
+        self.adj_file = adj_file
+
+    def load_graph(self) -> torch.Tensor:
+        adj_path = self.root_path / self.adj_file
+        if not adj_path.exists():
+            return torch.eye(self.enc_in, dtype=torch.float32)
+        adj_df = pd.read_csv(adj_path)
+        if {'src_FID', 'nbr_FID'}.issubset(adj_df.columns):
+            nodes = sorted(set(adj_df['src_FID'].astype(int)).union(set(adj_df['nbr_FID'].astype(int))))
+            node_to_idx = {nid: i for i, nid in enumerate(nodes)}
+            adj = torch.zeros((len(nodes), len(nodes)), dtype=torch.float32)
+            for _, row in adj_df.iterrows():
+                adj[node_to_idx[int(row['src_FID'])], node_to_idx[int(row['nbr_FID'])]] = 1.0
+            return adj
+        return torch.tensor(adj_df.values, dtype=torch.float32)
+
+    def compute_node_stats(self, train_series: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        return train_series.mean(dim=-1, keepdim=True), train_series.std(dim=-1, keepdim=True)
+
+    def compute_field_stats(self, train_series: torch.Tensor, graph: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        x_i = train_series.unsqueeze(2)
+        x_j = train_series.unsqueeze(1)
+        edge_flow = x_j - x_i
+        edge_mean = edge_flow.mean(dim=-1)
+        edge_var = edge_flow.std(dim=-1) + 1e-5
+        return edge_mean * graph.unsqueeze(0), edge_var * graph.unsqueeze(0)
 
 
 class BaseTargetSpaceAdapter(nn.Module):
@@ -14,7 +48,6 @@ class BaseTargetSpaceAdapter(nn.Module):
         x_future: torch.Tensor,
         x_history: torch.Tensor,
         use_local_scaling: bool,
-        holiday_flag: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         raise NotImplementedError
 
@@ -22,7 +55,6 @@ class BaseTargetSpaceAdapter(nn.Module):
         self,
         x_history: torch.Tensor,
         use_local_scaling: bool,
-        holiday_flag: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         raise NotImplementedError
 
@@ -31,7 +63,6 @@ class BaseTargetSpaceAdapter(nn.Module):
         pred: torch.Tensor,
         stats: Dict[str, torch.Tensor],
         use_local_scaling: bool,
-        holiday_flag: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -46,7 +77,7 @@ class VanillaNIAdapter(BaseTargetSpaceAdapter):
         node_scale = torch.std(x, dim=-1, keepdim=True)
         return node_mean, node_scale
 
-    def encode_training_future(self, x_future: torch.Tensor, x_history: torch.Tensor, use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def encode_training_future(self, x_future: torch.Tensor, x_history: torch.Tensor, use_local_scaling: bool):
         if use_local_scaling:
             node_count = x_future.shape[1]
             node_mean = torch.mean(x_future[:, -node_count:, :], dim=1, keepdim=True)
@@ -56,14 +87,14 @@ class VanillaNIAdapter(BaseTargetSpaceAdapter):
         x_norm = (x_future - node_mean) / (node_scale + self.eps)
         return x_norm, {'node_mean': node_mean, 'node_scale': node_scale}
 
-    def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool):
         if use_local_scaling:
             return x_history, {}
         node_mean, node_scale = self._compute_node_stats(x_history)
         x_norm = (x_history - node_mean) / (node_scale + self.eps)
         return x_norm, {'node_mean': node_mean, 'node_scale': node_scale}
 
-    def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool):
         if use_local_scaling:
             return pred
         node_mean = stats.get('node_mean')
@@ -121,7 +152,7 @@ class SFCN(VanillaNIAdapter):
         weighted = self.field_mask.unsqueeze(0).unsqueeze(-1) * edge_residual
         return weighted.sum(dim=2)
 
-    def encode_training_future(self, x_future: torch.Tensor, x_history: torch.Tensor, use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def encode_training_future(self, x_future: torch.Tensor, x_history: torch.Tensor, use_local_scaling: bool):
         node_mean, node_scale = self._compute_node_stats(x_future)
         field_stats_input = self._select_field_stats_source(x_future, x_history)
         edge_mean, edge_var = self.compute_field_stats(field_stats_input)
@@ -137,7 +168,7 @@ class SFCN(VanillaNIAdapter):
             'alpha': alpha,
         }
 
-    def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool):
         node_mean, node_scale = self._compute_node_stats(x_history)
         edge_mean, edge_var = self.compute_field_stats(x_history)
         alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
@@ -149,7 +180,7 @@ class SFCN(VanillaNIAdapter):
             'alpha': alpha,
         }
 
-    def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool, holiday_flag: torch.Tensor | None = None):
+    def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool):
         node_mean = stats.get('node_mean')
         node_scale = stats.get('node_scale')
         edge_var = stats.get('edge_var')
@@ -191,3 +222,32 @@ class LocalAdaptiveScaling(nn.Module):
         if not self.enabled or self.revin is None:
             return x
         return self.revin(x, 'denorm')
+
+
+def _build_field_stats_provider(configs) -> FieldStatsProvider:
+    return FieldStatsProvider(
+        root_path=getattr(configs, 'root_path', ''),
+        enc_in=int(getattr(configs, 'enc_in', 30)),
+        adj_file=getattr(configs, 'phase_e_adj_file', 'adjacent_gantry.csv'),
+    )
+
+
+def build_target_adapter(configs):
+    phase_e_enable = bool(getattr(configs, 'phase_e_enable', False))
+    if phase_e_enable:
+        provider = _build_field_stats_provider(configs)
+        return SFCN(
+            adj=provider.load_graph(),
+            coupling_init=float(getattr(configs, 'phase_e_zeta_init', 0.05)),
+            edge_var_window=int(getattr(configs, 'phase_e_edge_var_window', 720)),
+            field_stats_source=getattr(configs, 'phase_e_field_stats_source', 'future'),
+        )
+    return VanillaNIAdapter()
+
+
+def build_revin_adapter(configs):
+    enabled = bool(getattr(configs, 'new_norm', 0))
+    num_features = int(getattr(configs, 'enc_in', 1))
+    if not enabled:
+        return IdentityLocalScaling()
+    return LocalAdaptiveScaling(num_features=num_features, enabled=True, affine=True, subtract_last=False)

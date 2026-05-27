@@ -1,6 +1,6 @@
 import torch.nn as nn
 
-from Holidiff.frequency.factory import build_frequency_residual
+from Holidiff.frequency.build import build_frequency_residual
 
 
 class PhysicalInjectionModule(nn.Module):
