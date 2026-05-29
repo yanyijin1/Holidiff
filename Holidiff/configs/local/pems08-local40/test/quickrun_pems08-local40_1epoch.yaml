@@ -1,14 +1,16 @@
 task_name: long_term_forecast
 is_training: 1
-model_id: Fujian30_96_12
+version: ''
+model_id: PEMS08-Local40_96_12
 model: HATEK
 
-data: fujian30
-root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
-data_path: fujian30_clean.csv
+data: traffic_warehouse
+root_path: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/warehouse
+data_path: clean.csv
+adj_path: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/PEMS08-Local40.csv
 features: M
 target: traffic_flow
-freq: 15min
+freq: 5min
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
 
 seq_len: 96
@@ -17,14 +19,15 @@ pred_len: 12
 seasonal_patterns: Monthly
 inverse: false
 
+network_profile: base
 expand: 2
 d_conv: 4
 top_k: 5
 num_kernels: 6
 num_heads: 8
-enc_in: 30
-dec_in: 30
-c_out: 30
+enc_in: 40
+dec_in: 40
+c_out: 40
 d_model: 128
 n_heads: 8
 e_layers: 1
@@ -66,29 +69,29 @@ dca_mode: joint
 physical_injection_enable: true
 physical_residual_enable: true
 physical_residual_eta: 0.5
-physical_free_flow_epsilon: 0.0
+physical_residual_free_flow_epsilon: 0.0
 frequency_enable: true
 frequency_num_bands: 4
-frequency_patch_embed_fusion: concat_proj
-frequency_patch_embed_num_bands: 4
+frequency_patch_fusion: concat_proj
+frequency_patch_num_bands: 4
 frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
-phase_e_enable: true
-phase_e_adj_file: adjacent_gantry.csv
-phase_e_zeta_init: 0.05
-phase_e_edge_var_window: 720
-phase_e_field_stats_source: future
-phase_e_field_eta: 0.1
+spatial_field_enable: true
+spatial_graph_file: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/PEMS08-Local40.csv
+spatial_field_coupling_init: 0.05
+spatial_field_variance_window: 720
+spatial_field_stats_source: future
+local_scaling_enable: true
 holiday_enable: false
-new_norm: 1
 use_shuffle: 1
 use_first: 0
 
 num_workers: 4
 itr: 1
 train_epochs: 1
+log_interval: 100
 batch_size: 32
 patience: 10
 learning_rate: 0.0001
@@ -126,3 +129,6 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+holiday_col: is_holiday
+zero_as_missing: false
+extreme_filter_threshold: null

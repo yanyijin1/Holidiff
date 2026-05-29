@@ -57,23 +57,27 @@ class HATEK(nn.Module):
         self.T = 1.
         self.eps = 1e-5
         self.nn = self.tek
+        self.diffusion_to_field_gamma = nn.Parameter(torch.ones(1))
+        self.diffusion_to_field_beta = nn.Parameter(torch.zeros(1))
         self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None, future_target=None):
         if self.training:
+            if future_target is None:
+                raise ValueError('future_target must be provided during training.')
             return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                             enc_self_mask, dec_self_mask, dec_enc_mask)
+                                             enc_self_mask, dec_self_mask, dec_enc_mask, future_target=future_target)
         else:
             return self.forward_consensus_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
                                             enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
 
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None, future_target=None):
 
-        x = x_dec[:, -self.configs.pred_len:, :].permute(0, 2, 1)
+        x = future_target.permute(0, 2, 1)
         if x.shape[-1] < self.patch_len:
             pad_len = self.patch_len - x.shape[-1]
             x = F.pad(x, (0, pad_len), mode='replicate')
@@ -82,8 +86,13 @@ class HATEK(nn.Module):
         cond_ts = x_enc.permute(0, 2, 1)
         mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
         std_ = torch.std(cond_ts, dim=-1, keepdims=True)
-        cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
-        x = (x - mean_) / (std_ + 0.00001)
+        std_floor = float(getattr(self, 'std_floor', 1e-2))
+        hist_denom = torch.sqrt(std_.pow(2) + std_floor ** 2)
+        cond_ts = (cond_ts - mean_) / hist_denom
+        y_mean = torch.mean(x, dim=-1, keepdims=True)
+        y_std = torch.std(x, dim=-1, keepdims=True, unbiased=False)
+        y_denom = torch.sqrt(y_std.pow(2) + std_floor ** 2)
+        x = (x - y_mean) / y_denom
         B = np.shape(x)[0]
         N = self.configs.enc_in
         L1 = np.shape(cond_ts)[2]
@@ -97,7 +106,7 @@ class HATEK(nn.Module):
         x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
         model_out = self.nn(x_k, t, cond_ts, x_mark_enc)
         model_out = torch.reshape(model_out, (B, N, target_len))
-        model_out = model_out * (std_ + 0.00001) + mean_
+        model_out = (self.diffusion_to_field_gamma * model_out + self.diffusion_to_field_beta) * hist_denom[..., :target_len] + mean_[..., :target_len]
         weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, N, 1)
         model_out = model_out.permute(0, 2, 1)
         return model_out, weight_tmp
@@ -117,9 +126,11 @@ class HATEK(nn.Module):
         N = self.configs.enc_in
         mean_ = torch.mean(x_past, dim=-1, keepdims=True)
         std_ = torch.std(x_past, dim=-1, keepdims=True)
+        std_floor = float(getattr(self, 'std_floor', 1e-2))
+        hist_denom = torch.sqrt(std_.pow(2) + std_floor ** 2)
         mean_ = mean_.to(self.betas.device)
-        std_ = std_.to(self.betas.device)
-        x_past = (x_past - mean_) / (std_ + 0.00001)
+        hist_denom = hist_denom.to(self.betas.device)
+        x_past = (x_past - mean_) / hist_denom
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         for i in range(sample_times):
             start_code = torch.randn((batchs, nL), device=self.betas.device)
@@ -137,7 +148,7 @@ class HATEK(nn.Module):
             )
             diff_samples = diff_samples.to(self.betas.device)
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
-            diff_samples = diff_samples * (std_ + 0.00001) + mean_
+            diff_samples = (self.diffusion_to_field_gamma * diff_samples + self.diffusion_to_field_beta) * hist_denom + mean_
             diff_samples = diff_samples.permute(0, 2, 1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)

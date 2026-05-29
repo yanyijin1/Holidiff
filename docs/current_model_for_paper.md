@@ -1,319 +1,827 @@
-# Current Model Summary for Paper
+# Current Model Summary for Paper（论文终版对齐版）
 
-> 目标：整理当前保留模型，突出可写入论文的公式、模块与物理含义。  
-> 当前保留设置：**Trend-Aware PatchEmbed (concat) + Frequency-aware Phase-D Core（fixed FFT, K=4, patch_len=12）+ Hybrid Residual**，并保留时间趋势残差项（$\eta=0.5$）。
-
----
-
-## 0. 问题背景与整体架构
-
-### 0.1 核心矛盾：从确定性回归到条件分布
-
-传统交通预测将未来状态视为历史状态的确定性映射，即假设存在唯一真值 $\mathbf{Y}$ 使得 $\mathbf{Y}=f(\mathbf{X})$。这一假设在常规日场景下近似成立，因为训练与测试分布基本一致，模型只需拟合稳定的周期模式与空间依赖。
-
-然而，节假日诱发的**结构化分布漂移**（structured distribution shifts）使得该假设失效：
-- **低频层面**：整体需求基线发生抬升或下降；
-- **中频层面**：通勤节律改变，峰值时刻与形态偏移；
-- **高频层面**：局部拥堵与异常扰动增强，激波峰值更尖锐。
-
-相同的历史输入在节假日场景下可能对应多种等价的未来实现，单一确定性预测无法覆盖真实的不确定性范围。因此，未来状态应被理解为**条件分布** $p(\mathbf{Y}\,|\,\mathbf{X}, \mathbf{A})$ 的一次采样，而非确定性输出。
-
-### 0.2 微观实现与宏观估计的新范式
-
-基于上述观察，本文将交通预测重新表述为**微观实现**（micro-realization）与**宏观估计**（macro-flow estimation）的联合建模问题：
-
-1. **微观实现生成**：通过扩散模型对未来状态的条件分布进行建模，单次前向传播输出一条微观实现——对应一种可能的未来交通场景；
-2. **宏观交通流估计**：通过多次微观实现的聚合，从节假日增大的不确定性中提取稳健宏观交通流状态。
-
-这一范式转变的核心动机是：交通流本质上是微观车辆行为（跟驰、换道、加减速）的统计平均，宏观状态是多次微观实现的稳健中心。确定性回归强行压缩了这种多解性，而扩散模型通过逐步去噪生成多条候选轨迹，天然适合表达节假日场景下的预测多样性。
-
-### 0.3 保守偏差的三重根因
-
-尽管扩散模型具备表达多解性的能力，现有通用时间序列扩散模型在交通预测中仍存在**系统性保守偏差**：
-
-1. **PatchEmbed 平均池化抹平趋势**：patch 内激波峰值的上升/下降斜率被均值化，局部动力学信息丢失；
-2. **Softmax Attention 凸组合压制极值**：Transformer 注意力加权平均进一步平滑峰值；
-3. **MSE 损失条件均值陷阱**：去噪目标偏向统计安全估计，扩散采样聚集在条件均值附近，无法追踪激波峰值。
-
-这三重效应叠加，导致拥堵相（Congestion Phase）预测存在持续的峰值低估。在 Fujian-30 数据集上，原始 SimDiff 基线的拥堵相真阳性率 $TPR_{CG}=0.452$，显著低于物理真值 $0.473$；节假日拥堵子集 $Hol\_Cong\ MAE$ 高达 $36.9$。
-
-### 0.4 层次化解决思路
-
-本文以 SimDiff (AAAI 2026) 为基座，保留其扩散框架与 MoM 采样机制，在三个层次注入交通物理感知：
-
-1. **输入层**：将原始单通道 PatchEmbed 替换为 **Trend-Aware 频域解耦嵌入**，显式保留 patch 内斜率与多频带相位信息，缓解局部激波被均值化后的趋势湮灭；
-2. **主干层**：沿用 SimDiff Transformer Denoiser，不做结构性修改，保证扩散生成框架的完整性；
-3. **输出层**：在扩散去噪输出后附加 **历史趋势残差校正**，以一阶外推算子补偿拥堵相峰值低估。
+> 目标：将当前代码实现收敛到论文终版 HoliDiff 主线，明确哪些模块进入论文、哪些只作为消融或 legacy 代码保留。  
+> 论文主线：**Localized Spectral-Temporal Decoupling Embedding (LSTDE) + Spatial Field Coupled Normalization (SFCN) + Conditional Diffusion Micro-Realization Generation + Hybrid Trend Residual Correction + Density-Centroid Aggregation (DCA)**。
 
 ---
 
-## 1. 基础预测框架
+## 0. 论文终版核心设定
 
-交通流预测的核心任务，是根据一段历史观测恢复未来演化轨迹。对于扩散式预测器而言，这一过程可以理解为：先从噪声空间生成未来候选，再逐步去噪得到最终交通流序列。
+### 0.1 核心问题
 
-设历史输入为
-$$X^{\mathrm{hist}} \in \mathbb{R}^{B \times N \times L},$$
-其中 $B$ 为 batch size，$N$ 为空间节点数，$L$ 为历史长度。
+本文研究的是**节假日诱导的结构化交通流分布漂移**。节假日并不是简单改变平均流量，而是同时改变：
+
+- 日内需求基线；
+- 峰值相位与拥堵持续时间；
+- 节点间影响强度；
+- 频带能量分布；
+- 自由流、拥堵与过渡状态的边缘分布结构。
+
+因此，HoliDiff 不应被写成一个“带节假日标签的普通预测模型”，而应被写成：
+
+> 在节假日结构化漂移下，先生成多个可能的未来交通微观实现，再从采样点云中恢复具有交通状态代表性的宏观流量预测。
+
+### 0.2 最终保留模块
+
+| 模块 | 论文名称 | 代码建议名称 | 是否进入主线 | 作用 |
+|---|---|---|---|---|
+| 频域分解 + 趋势 patch 嵌入 | LSTDE | `FixedFFTDecomposer` + `TrendAwarePatchEmbedding` | 是 | 分离需求基线、峰值节律、局部扰动 |
+| 空间场耦合归一化 | SFCN | `SpatialFieldCoupledNorm` | 是 | 将 1-hop 拓扑邻域分布结构引入扩散目标空间 |
+| 条件扩散生成 | Micro-realization generation | `ConditionalDenoiser` / `DiffusionSampler` | 是 | 多次采样得到微观交通实现 |
+| 趋势残差校正 | Hybrid Trend Residual Correction | `HybridTrendResidual` | 是 | 补偿扩散预测对峰值斜率的保守估计 |
+| 密度质心聚合 | DCA | `DensityCentroidAggregator` | 是 | 从微观实现云团恢复宏观交通流状态 |
+
+### 0.3 不进入主模型的内容
+
+以下内容不应出现在 HoliDiff 主模型 forward 路径中：
+
+- `holiday_flag` / holiday condition 作为模型输入；
+- `aggregation_factory` 中的大量可插拔聚合器；
+- ABMS、WBP、RCL 等早期聚合器；
+- spectral gate、conditioner、modulator 等早期频域实验模块；
+- 复杂动态图学习、连续 distance/cost 边权、OSM 重构边权；
+- 高维轨迹聚类式聚合。
+
+其中，`holiday label` 仍然保留在 **data/eval/metrics** 中，用于：
+
+- 跨数据集节假日漂移分析；
+- Fujian-30 节假日细粒度评估；
+- Hol-MAE、Hol-CG MAE、HDR、PTE 等指标计算。
+
+它不作为 HoliDiff 主模型训练阶段的监督或条件输入。
+
+---
+
+## 1. 问题定义
+
+设高速路交通网络为
+
+\[
+G=(V,E,A), \qquad A \in \{0,1\}^{N\times N},
+\]
+
+其中 \(N=|V|\) 为传感器节点数，\(A\) 为二值邻接矩阵。给定历史窗口
+
+\[
+X \in \mathbb{R}^{B\times N\times L},
+\]
 
 目标是预测未来窗口
-$$X^{\mathrm{fut}} \in \mathbb{R}^{B \times N \times H},$$
-其中 $H$ 为预测长度。
 
-当前模型记为
-$$\hat{X}^{0} = f_{\theta}(X^{\mathrm{hist}}, t),$$
-其中 $f_{\theta}$ 是基于扩散去噪器的生成预测器，$t$ 为扩散时间步。
+\[
+Y \in \mathbb{R}^{B\times N\times H}.
+\]
 
----
+节假日标签 \(c\in\{0,1\}\) 仅用于分布漂移分析与评估，不作为模型主输入。本文关注的条件分布漂移为
 
-## 2. Patch Tokenization
+\[
+P(Y\mid X,G,c=1) \neq P(Y\mid X,G,c=0).
+\]
 
-交通流序列具有局部时段模式，例如短时上升、平台维持与回落过程。将长序列切分为 patch，可以把这些局部演化单元作为更稳定的建模对象，从而减轻逐点建模的噪声敏感性。
+HoliDiff 将预测过程解释为：
 
-对历史序列与未来噪声序列进行 patch 化。设 patch 长度为 $P$，stride 为 $S$。
+\[
+\{\hat{Y}^{(s)}\}_{s=1}^{S} \sim p_\theta(Y\mid X,G),
+\]
 
-历史 patch 表示为
-$$T^{\mathrm{hist}} = \mathrm{Unfold}(X^{\mathrm{hist}}; P, S) \in \mathbb{R}^{B \times N \times M \times P},$$
-其中 $M = \lfloor (L-P)/S \rfloor + 1$ 为 patch 数。未来 patch 表示为
-$$T^{\mathrm{fut}} = \mathrm{Unfold}(X^{\mathrm{fut}}; P, S) \in \mathbb{R}^{B \times N \times M_{f} \times P}.$$
+其中每个 \(\hat{Y}^{(s)}\) 是同一历史条件下的一种**微观交通实现**。最终预测不是简单平均，而是通过 DCA 得到宏观流状态估计：
 
-拼接后得到总 token 序列
-$$T = [T^{\mathrm{hist}}; T^{\mathrm{fut}}].$$
-
-当前保留的输入编码不是原始单通道 patch projection，而是 **Trend-Aware PatchEmbed (concat)**。对每个 patch，先提取局部线性斜率：
-$$\tau^{(i)}_{b,n} = \frac{T^{\mathrm{hist}}_{b,n,i,P-1} - T^{\mathrm{hist}}_{b,n,i,0}}{P-1} \in \mathbb{R}.$$
-
-然后将原 patch 值与趋势斜率拼接后投影，得到基线 token 表示：
-$$Z^{\mathrm{base}}_{b,n,i} = W_{\mathrm{concat}} \cdot [T^{\mathrm{hist}}_{b,n,i,:}; \tau^{(i)}_{b,n}] + b_{\mathrm{concat}} \in \mathbb{R}^{d},$$
-其中 $d$ 为 token 维度，$[\cdot; \cdot]$ 表示拼接操作。
-
-### 2.1 Frequency Decoupling (Fixed FFT, $K=4$)
-
-节假日诱发的交通分布漂移同时影响多个时间尺度：低频分量反映整体需求基线的抬升或下降，中频分量反映通勤节律的改变，高频分量反映局部拥堵与异常峰值的出现。显式分离这些频带，可使 Denoiser 在不同动力学尺度上获得差异化表征，避免常规日基线与节假日激波在时域混叠。
-
-在当前保留设置中，历史序列先进行固定频带分解。对每个样本、每个节点的时间序列做一维实数 FFT：
-$$\tilde{X}_{b,n,:} = \mathcal{F}\left(X^{\mathrm{hist}}_{b,n,:}\right) \in \mathbb{C}^{\lfloor L/2 \rfloor + 1},$$
-其中 $\mathcal{F}$ 作用于最后一个时间维度。
-
-将频域索引均分为 $K=4$ 个带通区间 $\{\Omega_k\}_{k=1}^{K}$，构造硬掩码 $M_k$：
-$$\tilde{X}^{(k)}_{b,n,:} = M_k \odot \tilde{X}_{b,n,:}, \qquad X^{(k)}_{b,n,:} = \mathcal{F}^{-1}\left(\tilde{X}^{(k)}_{b,n,:}\right) \in \mathbb{R}^{L}.$$
-
-于是得到频带集合
-$$\mathcal{B}=\{X^{(k)}\}_{k=1}^{K},\qquad K=4.$$
-
-四个频带的交通物理意义如下：
-
-| 频带 $k$ | 频率范围 | 交通物理意义 | 节假日变化 |
-|:---:|:---|:---|:---|
-| 1 (low) | 低频段 | 日级/周级需求基线 | 整体需求抬升或下降 |
-| 2 (low-mid) | 中低频段 | 通勤节律（早晚高峰周期） | 峰值时刻偏移 |
-| 3 (mid-high) | 中高频段 | 拥堵形成/消散过渡 | 激波强度变化 |
-| 4 (high) | 高频段 | 局部激波/短时异常 | 异常峰值增强 |
-
-关键洞察：常规日与节假日的差异主要体现在低频基线和中频节律，而拥堵激波本身的高频动力学具有跨域不变性。频域解耦使得 Denoiser 可以分别处理"漂移的基线"与"不变的激波"，避免两者在时域混叠导致的保守估计。
-
-### 2.2 Band-wise Patch Injection
-
-对每个频带 $X^{(k)}$ 做与主干一致的 patch 切分，并提取带内局部斜率：
-$$T^{(k)} = \mathrm{Unfold}(X^{(k)}; P, S) \in \mathbb{R}^{B \times N \times M \times P},$$
-$$\tau^{(k)}_{b,n,i} = \frac{T^{(k)}_{b,n,i,P-1} - T^{(k)}_{b,n,i,0}}{P-1} \in \mathbb{R}.$$
-
-频带级 patch 嵌入写为
-$$E^{(k)}_{b,n,i} = W_k \cdot [T^{(k)}_{b,n,i,:}; \tau^{(k)}_{b,n,i}] + b_k \in \mathbb{R}^{d_k},$$
-其中 $d_k = d / K$ 为单频带投影维度。
-
-将 $K$ 个频带嵌入拼接并投影回 $d$-维 token 空间：
-$$E^{\mathrm{freq}}_{b,n,i} = W_f \cdot [E^{(1)}_{b,n,i}; \dots; E^{(K)}_{b,n,i}] + b_f \in \mathbb{R}^{d}.$$
-
-当前模型采用 **embed_replace** 策略：频域解耦嵌入完全替代原始单通道基线编码，作为 Denoiser 的输入 token：
-$$Z_{b,n,i} = E^{\mathrm{freq}}_{b,n,i}.$$
-
-最后加入时间位置编码与扩散时间步编码：
-$$Z^{(0)} = [z_t; Z].$$
-
-这样做的核心目的，是让模型不仅看到某一段"数值高低"，也能看到该 patch 内部"正在上升还是下降"，并显式保留不同频带的相位与幅值信息，从而缓解局部激波被均值化后的趋势湮灭。
+\[
+\hat{Y}_{\mathrm{macro}} = \mathrm{DCA}\left(\{\hat{Y}^{(s)}\}_{s=1}^{S}; X\right).
+\]
 
 ---
 
-## 3. Denoiser Backbone
+## 2. HoliDiff 主流程
 
-交通流在不同站点、不同时间片之间存在复杂的相关结构，因此去噪器需要同时建模局部时序依赖与未来演化的一致性。当前 backbone 沿用 SimDiff 原始架构，不做结构性修改，以保证扩散生成框架的完整性与可复现性。
+最终主模型应保持一条清晰路径：
 
-当前去噪器由多层 token attention 组成，输入为 $Z^{(0)}$，基本块形式可写为
-$$Z' = \mathrm{Attn}(Z), \qquad Z'' = \mathrm{FFN}(Z').$$
+```text
+X, A
+  └── LSTDE
+        ├── Fixed FFT decomposition
+        └── Trend-aware patch embedding
+  └── SFCN field statistics
+        ├── training: future-field encoding
+        └── inference: history-field decoding
+  └── Conditional diffusion denoising
+        └── S samples of micro-realizations
+  └── Hybrid trend residual correction
+  └── DCA macro-flow aggregation
+        └── final prediction
+```
 
-最终 flatten 后通过输出层映射到预测窗口：
-$$\hat{X}^{0} = W_{\mathrm{out}} \cdot \mathrm{Flatten}(Z'') \in \mathbb{R}^{B \times N \times H}.$$
+对应代码主路径建议为：
 
-这对应扩散预测中的 $x_0$ 重建项，即未来交通流预测的原始输出。
+```python
+class HoliDiff(nn.Module):
+    def __init__(self, cfg):
+        self.decomposer = FixedFFTDecomposer(num_bands=cfg.num_bands)
+        self.patch_embed = TrendAwarePatchEmbedding(patch_len=cfg.patch_len)
+        self.sfcn = SpatialFieldCoupledNorm(alpha=cfg.sfcn.alpha)
+        self.denoiser = ConditionalDenoiser(cfg)
+        self.diffusion = DiffusionSampler(cfg)
+        self.residual = HybridTrendResidual(eta=cfg.residual.eta)
+        self.aggregator = DensityCentroidAggregator(cfg.dca)
 
----
+    def forward_train(self, x, y, adj):
+        cond = self.encode_history(x)
+        y_field = self.sfcn.encode(y, adj)
+        loss = self.diffusion.training_loss(y_field, cond)
+        return loss
 
-## 4. Historical Trend Residual
+    @torch.no_grad()
+    def sample(self, x, adj, num_samples):
+        cond = self.encode_history(x)
+        z_samples = self.diffusion.sample(cond, num_samples)
+        y_samples = self.sfcn.decode(z_samples, x, adj)
+        y_samples = self.residual(y_samples, x)
+        y_hat = self.aggregator(y_samples, x)
+        return y_hat, y_samples
+```
 
-在交通流场景中，主干生成器往往能恢复整体形状，但对拥堵形成或消散阶段的斜率延续仍可能偏保守。因此，我们在输出端显式引入历史趋势残差，用一个低成本的一阶外推项补偿这种系统性低估。
-
-### 4.1 历史趋势斜率
-
-这一模块首先从历史窗口中提取最直接的物理线索：趋势方向。对每个样本、每个节点定义历史趋势斜率：
-$$s^{\mathrm{hist}}_{b,n} = \frac{X^{\mathrm{hist}}_{b,n,L} - X^{\mathrm{hist}}_{b,n,1}}{L-1} \in \mathbb{R}.$$
-
-该斜率编码了历史窗口内交通流的整体演化方向：$s^{\mathrm{hist}} > 0$ 对应上升趋势（拥堵正在形成，交通波向上游传播），$s^{\mathrm{hist}} < 0$ 对应下降趋势（拥堵缓解，交通波向下游消散），$s^{\mathrm{hist}} \approx 0$ 对应自由流稳态或平台期。
-
-### 4.2 固定参数化
-
-为了保持趋势残差校正的结构简单且稳定，当前模型将校正强度定义为一个固定标量参数：
-$$\mathcal{R}_{\eta}(s^{\mathrm{hist}}, h) = \eta \cdot s^{\mathrm{hist}} \cdot h, \qquad \eta \in \mathbb{R}_{+}.$$
-
-在最终保留模型中，$\eta$ 取常数：
-$$\eta = 0.5.$$
-
-因此，相比自适应参数化，这里保留的是一个**固定系数的趋势外推算子**。它不引入新的学习参数，也不改变主干网络结构，只通过一个显式常数控制历史趋势向未来的传播强度。
-
-从模型角度看，这一设定的好处是：
-- 保持结构最小化；
-- 保持校正项可解释；
-- 避免额外自由度干扰主干生成器。
-
-### 4.3 残差校正公式
-
-在固定 $\eta$ 的设定下，对未来第 $h$ 个预测步，校正项写为：
-$$\Delta X_{b,n,h} = \mathcal{R}_{\eta}(s^{\mathrm{hist}}_{b,n}, h) = \eta \cdot s^{\mathrm{hist}}_{b,n} \cdot h.$$
-
-因此最终预测为：
-$$\hat{X}^{\mathrm{corr}}_{b,n,h} = \hat{X}^{0}_{b,n,h} + \mathcal{R}_{\eta}(s^{\mathrm{hist}}_{b,n}, h).$$
-
-代入固定系数形式，可得：
-$$\hat{X}^{\mathrm{corr}}_{b,n,h} = \hat{X}^{0}_{b,n,h} + \eta \cdot s^{\mathrm{hist}}_{b,n} \cdot h, \qquad \eta = 0.5.$$
-
-矩阵形式写为：
-$$\hat{X}^{\mathrm{corr}} = \hat{X}^{0} + \eta \cdot s^{\mathrm{hist}} \otimes \tau,$$
-其中：
-- $s^{\mathrm{hist}} \in \mathbb{R}^{B \times N}$，
-- $\tau = [1, 2, \dots, H]^{\top} \in \mathbb{R}^{H}$，
-- $\otimes$ 表示外积（通过广播实现逐元素乘法），结果维度为 $\mathbb{R}^{B \times N \times H}$。
-
-该模块本质上对应一个**固定参数的一阶趋势延续算子**，用显式外推项补偿扩散模型的保守估计。
+主路径中不再保留可插拔 factory，不再在模型内部根据字符串动态切换 ABMS/WBP/RCL/MoM 等聚合器。
 
 ---
 
-## 5. Physical Interpretation
+## 3. LSTDE：局部谱时序解耦嵌入
 
-从交通流机理上看，该模块等价于在数据驱动预测之外，再加入一个"局部趋势延续"的显式先验。它不改变主干网络的表示方式，而是用物理上更易解释的形式纠正未来相位中的偏保守输出。
+### 3.1 目的
 
-### 5.1 趋势斜率的交通语义
+节假日分布漂移同时发生在多个时间尺度：
 
-| 数学条件 | 交通物理意义 | 节假日场景行为 |
-|:---|:---|:---|
-| $s^{\mathrm{hist}} > 0$ | 交通波向上游传播，拥堵正在形成 | 节假日高峰提前，激波斜率更陡，扩散模型更易低估 |
-| $s^{\mathrm{hist}} \approx 0$ | 自由流稳态或拥堵完全消散 | 节假日基线抬升但无局部激波，校正项近似为零 |
-| $s^{\mathrm{hist}} < 0$ | 交通波向下游消散，拥堵缓解 | 节假日返程高峰后快速回落，校正项为负防止过估 |
+- 低频：需求基线变化；
+- 中频：峰值节律与相位偏移；
+- 高频：局部拥堵、短时突增和激波扰动。
 
-### 5.2 固定系数 $\eta = 0.5$ 的物理含义
+LSTDE 的作用是将这些混合在原始时域中的变化解耦，使去噪器能够分别接收不同尺度的条件信息。
 
-$\eta = 0.5$ 对应**半速外推**：承认扩散模型已通过去噪过程捕获了部分趋势信息，但保守估计仍不足，需要额外补偿历史斜率的 50%。这一数值不是通过网格搜索得到的最优拟合参数，而是基于以下交通物理直觉：
+### 3.2 Fixed FFT decomposition
 
-- 若 $\eta = 1.0$（全速外推），则假设历史趋势完全延续至未来，忽略了拥堵激波在传播过程中的衰减与消散（LWR 理论中的冲击波宽度有限性），容易导致自由流阶段的过估；
-- 若 $\eta = 0$，则完全依赖扩散模型的保守估计，拥堵相峰值持续低估；
-- $\eta = 0.5$ 在"补偿保守偏差"与"避免过度外推"之间取得平衡，且作为固定常数不引入额外自由度，保证了模型的泛化稳定性。
+对每个节点的历史序列执行一维实数 FFT：
+
+\[
+\tilde{X}_{b,n,:}=\mathcal{F}(X_{b,n,:}).
+\]
+
+将频域索引划分为 \(K\) 个固定频带，当前论文终版取：
+
+\[
+K=4.
+\]
+
+第 \(k\) 个频带为
+
+\[
+\tilde{X}^{(k)}_{b,n,:}=M_k\odot \tilde{X}_{b,n,:},
+\qquad
+X^{(k)}_{b,n,:}=\mathcal{F}^{-1}(\tilde{X}^{(k)}_{b,n,:}).
+\]
+
+得到频带集合：
+
+\[
+\mathcal{B}=\{X^{(k)}\}_{k=1}^{K}.
+\]
+
+### 3.3 Trend-aware patch embedding
+
+对每个频带序列切分 patch。设 patch 长度为 \(P\)，当前论文终版取：
+
+\[
+P=12.
+\]
+
+第 \(k\) 个频带的 patch 表示为
+
+\[
+T^{(k)}=\mathrm{Unfold}(X^{(k)};P,S).
+\]
+
+对每个 patch 提取局部趋势斜率：
+
+\[
+\tau^{(k)}_{b,n,m}
+=
+\frac{T^{(k)}_{b,n,m,\mathrm{end}}-T^{(k)}_{b,n,m,\mathrm{start}}}{P-1}.
+\]
+
+将 patch 原始值与斜率拼接后投影：
+
+\[
+E^{(k)}_{b,n,m}
+=
+W_k\left[T^{(k)}_{b,n,m,:};\tau^{(k)}_{b,n,m}\right]+b_k.
+\]
+
+融合所有频带：
+
+\[
+Z_{b,n,m}=F_{\mathrm{fuse}}(E^{(1)},\ldots,E^{(K)}).
+\]
+
+代码中对应：
+
+```text
+frequency/decompose.py      -> FixedFFTDecomposer
+frequency/patch_embed.py    -> TrendAwarePatchEmbedding
+```
+
+不再进入主线的早期频域模块：
+
+```text
+frequency/conditioner.py
+frequency/modulator.py
+frequency/fusion.py
+frequency/spectral_gate.py
+```
+
+这些模块若暂时需要保留，应移动到 `legacy/frequency/`。
 
 ---
 
-## 6. Why This Module Is Kept
+## 4. SFCN：空间场耦合归一化
 
-对于当前模型阶段，我们需要保留的是一种既有效、又容易解释、同时改动足够小的增强方式。Trend-Aware PatchEmbed (concat)、Fixed FFT 频率解耦（$K=4$）与 fixed historical trend residual 满足这三个条件，因此适合作为当前版本的保留模块。
+### 4.1 目的
 
-保留该模块的原因是：
+SFCN 不是学习复杂边权，也不是使用 distance/cost 作为连续边权。它只利用二值邻接矩阵 \(A\) 定义 1-hop 拓扑邻域，将节点自身分布与邻域相对差分结构编码到扩散目标空间。
 
-1. **不改动主干生成器结构**  
-   仅在输入编码与输出层后增加显式趋势信息和物理校正，代价小，可回滚。
+所有数据集统一使用二值邻接矩阵：
 
-2. **直接针对系统性低估问题**  
-   Trend-Aware PatchEmbed 缓解局部趋势抹平，频率解耦保留多频带结构，固定残差校正直接补偿拥堵相峰值低估。
+\[
+A_{ij}=1 \quad \text{if an edge from sensor } i \text{ to sensor } j \text{ is provided.}
+\]
 
-3. **具有明确物理解释**  
-   输入端显式编码 patch 内斜率与频带相位，输出端显式沿历史趋势方向做半速外推，每个模块的行为都可映射到交通流动力学概念。
+自环在数据图中去除；SFCN 内部需要节点自身统计量时通过对角统计项处理。
 
-4. **实验上已验证有效**  
-   当前最终保留版本在总 MAE、CG_MAE 与 TPR_CG 上都优于原始 SimDiff baseline，且对节假日拥堵子集（Hol_Cong）改善最为显著。
+### 4.2 场统计量
+
+构造场统计量集合
+
+\[
+\Theta_{\mathrm{field}}=\{F_\mu,F_\sigma,\alpha\}.
+\]
+
+其中 \(F_\mu,F_\sigma\in\mathbb{R}^{N\times N}\) 的非零结构由 \(A\) 与对角项共同决定：
+
+\[
+F_\mu[i,j]
+=
+\begin{cases}
+\mu_i, & i=j,\\
+\delta_{ij}=\mu_j-\mu_i, & (i,j)\in E,\\
+0, & \text{otherwise},
+\end{cases}
+\]
+
+\[
+F_\sigma[i,j]
+=
+\begin{cases}
+\sigma_i, & i=j,\\
+\nu_{ij}=\mathrm{Std}(X_j-X_i), & (i,j)\in E,\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+
+### 4.3 训练时场编码
+
+训练阶段使用未来真值统计量构造归一化目标。节点残差为
+
+\[
+\tilde{Y}^{(0)}_{b,i,h}
+=
+\frac{Y_{b,i,h}-\mu^{\mathrm{fut}}_i}{\sigma^{\mathrm{fut}}_i}.
+\]
+
+场耦合残差使用度归一化邻接权重：
+
+\[
+\tilde{Y}^{(1)}_{b,i,h}
+=
+\sum_{j\in\mathcal{N}(i)}
+\frac{A_{ij}}{\mathrm{deg}(i)}
+\cdot
+\frac{(Y_{b,j,h}-Y_{b,i,h})-\delta^{\mathrm{fut}}_{ij}}{\nu^{\mathrm{fut}}_{ij}}.
+\]
+
+联合场化目标为
+
+\[
+\tilde{Y}_{b,i,h}
+=
+\tilde{Y}^{(0)}_{b,i,h}
++
+\alpha\cdot \tilde{Y}^{(1)}_{b,i,h}.
+\]
+
+其中 \(\alpha>0\) 为场耦合强度。当前代码可使用 learnable \(\alpha\)，并通过 softplus 或 clamp 保证非负。
+
+### 4.4 推理时场解码
+
+推理阶段未来统计量不可知，因此使用历史观测统计量代理未来场结构。节点预测为
+
+\[
+\hat{Y}^{(0)}_{b,i,h}
+=
+\sigma^{\mathrm{hist}}_i z_{b,i,h}+\mu^{\mathrm{hist}}_i.
+\]
+
+场渗透项为
+
+\[
+\hat{Y}^{(1)}_{b,i,h}
+=
+\sum_{j\in\mathcal{N}(i)}
+\frac{A_{ij}}{\mathrm{deg}(i)}
+\cdot
+\nu^{\mathrm{hist}}_{ij}(z_{b,j,h}-z_{b,i,h}).
+\]
+
+最终解码为
+
+\[
+\hat{Y}_{b,i,h}
+=
+\hat{Y}^{(0)}_{b,i,h}
++
+\alpha\cdot \hat{Y}^{(1)}_{b,i,h}.
+\]
+
+当 \(\alpha=0\) 时，SFCN 退化为单点归一化/反归一化。
+
+代码中对应：
+
+```text
+micro/sfcn.py -> SpatialFieldCoupledNorm
+```
 
 ---
 
-## 7. Main Experimental Results
+## 5. Conditional Diffusion Micro-Realization Generation
 
-当前保留模型的核心实验结果如下。
+扩散模型在场化空间中学习条件未来分布。令 \(x_0=\tilde{Y}\)，前向扩散为
 
-### 7.0 模型演进总览（30 epoch 口径，Fujian-30）
+\[
+q(x_t\mid x_0)
+=
+\mathcal{N}\left(\sqrt{\bar{\alpha}_t}x_0,(1-\bar{\alpha}_t)I\right).
+\]
 
-| 阶段 | 配置 | Test MAE | Test MSE | Test RMSE | Free MAE | Cong MAE | Hol\_Cong MAE | TPR\_Cong |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| SimDiff 原始 | 无 patch trend, 无频域, 无残差 | 0.2296 | 0.1020 | 0.3194 | 13.8832 | 30.8779 | - | 0.4519 |
-| Phase-A | + Trend-Aware concat | 0.2279 | 0.1012 | 0.3180 | 13.6976 | 30.7651 | 36.5047 | 0.4662 |
-| Phase-A + Residual | + fixed eta=0.5 | 0.2276 | 0.1003 | 0.3167 | 13.7973 | 30.5635 | 36.2804 | 0.4742 |
+去噪网络学习噪声估计：
 
-从 SimDiff 原始基线到 Phase-A + Residual，总 MAE 从 0.2296 降至 0.2276（-0.87%），拥堵相 MAE 从 30.88 降至 30.56（-1.04%），节假日拥堵 MAE 从未统计改进至 36.28，TPR\_Cong 从 0.452 提升至 0.474（+4.9%）。
+\[
+\mathcal{L}
+=
+\mathbb{E}_{t,\epsilon}
+\left[\left\|\epsilon-
+\epsilon_\theta(x_t,t,Z)
+\right\|_2^2\right].
+\]
 
-### 7.1 频带数 K 消融（Phase-D Core, 20 epoch 口径）
+训练后，对同一历史输入执行 \(S\) 次采样：
 
-| K | Best Vali Loss | Test MAE | Test MSE | Test RMSE | Cong MAE |
-|---:|---------------:|---------:|---------:|----------:|---------:|
-| 2 | 0.2188174 | 0.2277 | 0.1004 | 0.3169 | 30.5817 |
-| 3 | 0.2184268 | 0.2276 | 0.1004 | 0.3168 | 30.6079 |
-| 4 | **0.2179760** | **0.2276** | **0.1003** | **0.3166** | **30.5693** |
+\[
+\{\hat{Y}^{(s)}\}_{s=1}^{S}, \qquad s=1,\ldots,S.
+\]
 
-由此固定频带数为 $K=4$。
+当前论文终版推荐：
 
-### 7.2 第二层局部搜索（固定 K=4）
+\[
+S=10.
+\]
 
-| 变体 | Best Vali Loss | Test MAE | Test MSE | Test RMSE | Cong MAE | Hol_Cong MAE |
-|---|---------------:|---------:|---------:|----------:|---------:|--------------:|
-| baseline (patch_len=16, fixed_fft) | **0.2179760** | 0.2276 | 0.1003 | 0.3166 | 30.5693 | 36.1085 |
-| beta learnable | 0.2184280 | 0.2277 | 0.1003 | 0.3168 | 30.5870 | 36.1549 |
-| patch_len=24 | 0.2199259 | 0.2277 | 0.1005 | 0.3170 | 30.6551 | 36.1364 |
-| patch_len=12 | 0.2186021 | **0.2274** | **0.1001** | **0.3164** | **30.5262** | **35.9142** |
-| learnable_fft | 0.2189887 | 0.2279 | 0.1006 | 0.3172 | 30.6644 | 36.3284 |
+每一条 \(\hat{Y}^{(s)}\) 被解释为一个微观交通实现，而不是普通可交换统计样本。
 
-### 7.3 结果分析与配置定版
+---
 
-尽管 patch_len=12 的 Best Vali Loss（0.2186）略高于 baseline（0.2180），但其在测试集上全面更优，尤其在节假日拥堵子集（Hol_Cong MAE = 35.91 vs 36.11）上优势显著。这一现象符合**分布漂移假设**：验证集与训练集同分布（常规日为主），更粗的 patch（len=16）在平滑分布下拟合更优；而测试集包含节假日漂移，更细的 patch（len=12）能捕捉激波斜率突变，因此在漂移场景下泛化更优。这进一步证明了输入层频域解耦对分布漂移的必要性。
+## 6. Hybrid Trend Residual Correction
 
-因此，综合测试指标（含拥堵相与节假日子集）最优解为：
-$$K=4,\ \texttt{patch\_len}=12,\ \texttt{frequency\_decomp}=\texttt{fixed\_fft}.$$
+### 6.1 目的
 
-### 7.4 当前论文保留配置（简表）
+扩散模型容易产生均值回归式预测，在峰值上升沿或拥堵形成阶段偏保守。趋势残差校正用于补偿这种斜率低估。
 
-| 组件 | 当前取值 |
-|---|---|
-| Patch Encoder | Trend-Aware concat |
-| Frequency Enable | true |
-| Frequency Decomposer | fixed_fft |
-| Num Bands $K$ | 4 |
-| Frequency Injection | embed_replace |
-| Frequency Patch Embed | band_trend + concat_proj |
-| Residual Type | hybrid_residual |
-| Physical Residual Eta | 0.5 |
-| Patch Length | 12 |
-| Stride | 1 |
-| Spatial Field Enable | true |
-| Spatial Field Target Adapter | matrix_ni |
-| Spatial Field Coupling $\zeta$ | 0.05 (fixed) |
-| Spatial Edge Variance Window | 720 |
-| Spatial Adjacency | topology |
-| Local Scaling Adapter | vanilla_revin |
+### 6.2 时间趋势残差
 
-据此，当前论文版本模型可定义为：
+历史趋势斜率为
 
-> **Trend-Aware PatchEmbed (concat) + Phase-D Frequency Core (fixed FFT, $K=4$, patch_len=12) + Hybrid Residual ($\eta=0.5$) + SFCN target adapter ($\zeta=0.05$, edge-var window = 720)**。
+\[
+s^{\mathrm{hist}}_{b,n}
+=
+\frac{X_{b,n,L}-X_{b,n,1}}{L-1}.
+\]
 
-### 7.5 SFCN 精细化实验结果对比（20 epoch 口径）
+时间趋势外推为
 
-| 实验 | 配置变化 | Test MAE | Test RMSE | Cong MAE | Hol\_Cong MAE | SGFE | 结论 |
-|---|---|---:|---:|---:|---:|---:|---|
-| exp1\_zeta005 | $\zeta=0.05$ | **0.2267** | **0.3151** | 30.3810 | **35.7827** | **25.2717** | 最优初始化 |
-| exp1\_zeta01 | $\zeta=0.10$ | 0.2268 | 0.3151 | 30.3854 | 35.7943 | 25.2947 | 略差于 0.05 |
-| exp1\_zeta02 | $\zeta=0.20$ | 0.2269 | 0.3153 | 30.4008 | 35.8199 | 25.3471 | 更大初始化无收益 |
-| exp2\_edgevar168 | edge-var window = 168 | 0.2269 | 0.3153 | 30.4038 | 35.8231 | 25.3483 | 短窗口不稳定 |
-| exp2\_edgevar336 | edge-var window = 336 | 0.2268 | 0.3152 | 30.3864 | 35.8101 | 25.3474 | 中等窗口仍不如长窗 |
-| exp2\_edgevar720 | edge-var window = 720 | **0.2267** | **0.3151** | **30.3677** | 35.7945 | 25.3476 | 最优边统计窗口 |
-| exp3\_directed\_adj | mean-gradient directed adjacency | 0.2296 | 0.3191 | 30.6763 | 36.2049 | 25.5951 | 明显退化，删除 |
+\[
+\Delta Y^{\mathrm{time}}_{b,n,h}
+=
+\eta\cdot s^{\mathrm{hist}}_{b,n}\cdot h,
+\qquad h=1,\ldots,H.
+\]
 
-这一轮精细化实验表明：SFCN 模块的最优保留策略并不是引入更复杂的方向化邻接或短时自适应统计，而是保留**最简单且最稳定**的设置：固定拓扑邻接、较小的场耦合系数 $\zeta=0.05$、以及较长时间窗口（720）估计边差值标准差。方向化邻接在总 MAE、拥堵相 MAE、Hol\_Cong MAE 与 SGFE 上均明显退化，因此不再保留进最终模型。
+当前论文终版默认：
+
+\[
+\eta=0.5.
+\]
+
+### 6.3 频带趋势残差
+
+若代码中已经能够从 LSTDE 输出频带级历史斜率，可进一步构造频带趋势项：
+
+\[
+\Delta Y^{\mathrm{freq}}_{b,n,h}
+=
+\sum_{k=1}^{K}\beta_k\eta_k s^{\mathrm{hist},(k)}_{b,n}\cdot h.
+\]
+
+最终混合残差为
+
+\[
+\Delta Y
+=
+\lambda\Delta Y^{\mathrm{time}}
++(1-\lambda)\Delta Y^{\mathrm{freq}}.
+\]
+
+校正后的采样实现为
+
+\[
+\hat{Y}^{(s)}\leftarrow \hat{Y}^{(s)}+\Delta Y.
+\]
+
+如果当前代码暂时只实现时间趋势残差，则可视为 \(\lambda=1\) 的简化版本，但文档和命名仍建议保留 `HybridTrendResidual` 接口，便于与论文公式一致。
+
+代码中对应：
+
+```text
+frequency/residual.py -> HybridTrendResidual
+```
+
+---
+
+## 7. DCA：密度质心聚合
+
+### 7.1 目的
+
+多次扩散采样得到的是微观实现云团。节假日拥堵场景下，样本可能形成自由流、拥堵和过渡状态附近的多峰结构。简单 Mean / Median / MoM 可能落入状态之间的低密度区域，得到物理含义不明确的中间预测。
+
+DCA 的目标是从微观实现云团中恢复更符合交通状态结构的宏观流量预测。
+
+### 7.2 逐点聚合粒度
+
+DCA 沿样本轴逐点作用于每个时空位置 \((b,h,n)\)，而不是对完整高维轨迹聚类。
+
+给定
+
+\[
+\left\{\hat{Y}^{(s)}_{b,h,n}\right\}_{s=1}^{S},
+\]
+
+分别计算点云内部密度权重和历史稳态相容权重。
+
+### 7.3 点云内部密度权重
+
+\[
+\rho^{\mathrm{cloud}}_{b,h,n,s}
+=
+\frac{1}{S}\sum_{s'=1}^{S}
+\exp\left(
+-
+\frac{(\hat{Y}^{(s)}_{b,h,n}-\hat{Y}^{(s')}_{b,h,n})^2}{2h_{\mathrm{kde}}^2}
+\right).
+\]
+
+该权重使聚合中心偏向采样点云中的密集区域。
+
+### 7.4 历史稳态相容权重
+
+对每个节点 \(n\)，根据历史上下文中位数划分两个历史稳态子集：
+
+\[
+S_{n,\mathrm{free}}
+=
+\{y\in X^{\mathrm{hist}}_n \mid y\le m_n\},
+\qquad
+S_{n,\mathrm{cong}}
+=
+X^{\mathrm{hist}}_n\setminus S_{n,\mathrm{free}},
+\]
+
+其中
+
+\[
+m_n=\mathrm{median}(X^{\mathrm{hist}}_n).
+\]
+
+分别计算采样值与两类历史状态的核平滑相容度：
+
+\[
+\ell^{\mathrm{free}}_{b,h,n,s}
+=
+\sum_{y\in S_{n,\mathrm{free}}}
+\exp\left(
+-
+\frac{(\hat{Y}^{(s)}_{b,h,n}-y)^2}{2h_{\mathrm{hist}}^2}
+\right),
+\]
+
+\[
+\ell^{\mathrm{cong}}_{b,h,n,s}
+=
+\sum_{y\in S_{n,\mathrm{cong}}}
+\exp\left(
+-
+\frac{(\hat{Y}^{(s)}_{b,h,n}-y)^2}{2h_{\mathrm{hist}}^2}
+\right).
+\]
+
+论文终版采用二者之和，而不是 max：
+
+\[
+\rho^{\mathrm{hist}}_{b,h,n,s}
+=
+\ell^{\mathrm{free}}_{b,h,n,s}
++
+\ell^{\mathrm{cong}}_{b,h,n,s}.
+\]
+
+### 7.5 密度质心估计
+
+联合权重为
+
+\[
+w_{b,h,n,s}
+=
+\rho^{\mathrm{cloud}}_{b,h,n,s}
+\cdot
+\rho^{\mathrm{hist}}_{b,h,n,s}.
+\]
+
+最终输出为
+
+\[
+\hat{Y}_{\mathrm{macro},b,h,n}
+=
+\frac{\sum_{s=1}^{S}w_{b,h,n,s}\hat{Y}^{(s)}_{b,h,n}}{\sum_{s=1}^{S}w_{b,h,n,s}}.
+\]
+
+代码中对应：
+
+```text
+macro/dca_aggregator.py -> DensityCentroidAggregator
+```
+
+---
+
+## 8. 聚合器代码边界
+
+### 8.1 主线聚合器
+
+只保留 DCA 作为 HoliDiff 主模型默认聚合器：
+
+```text
+macro/dca_aggregator.py
+```
+
+### 8.2 论文消融用聚合器
+
+Mean、Median、MoM 只作为实验对照，不进入 HoliDiff 主路径：
+
+```text
+macro/simple_aggregators.py
+  - mean_aggregate
+  - median_aggregate
+  - mom_aggregate
+  - kde_mode_aggregate
+```
+
+这些聚合器用于：
+
+- `w/o DCA (Mean)`；
+- `w/o DCA (Median)`；
+- `w/o DCA (MoM)`；
+- Table IX 聚合策略对比。
+
+### 8.3 非论文主线聚合器
+
+以下聚合器不写入主论文方法，不进入主模型路径：
+
+```text
+ABMS
+WBP
+RCL
+```
+
+如果需要保留实验记录，移动到：
+
+```text
+legacy/aggregation/
+```
+
+### 8.4 SCP 的位置
+
+`SCP` 可以作为轻量工程备选暂时保留，但当前论文主线不依赖它。建议放在：
+
+```text
+macro/scp_aggregator.py
+```
+
+并在文档中标注：
+
+> SCP is an engineering backup and is not part of the main HoliDiff method unless explicitly added to appendix experiments.
+
+---
+
+## 9. 实验脚本与论文表图对应
+
+`exp/` 只负责训练、评估和导出结果，不负责画图。  
+`plot/` 只负责读取 `outputs/` 中的结果并画图，不重新训练模型。
+
+### 9.1 exp 目录
+
+```text
+exp/
+  exp01_shift_score.py
+  exp02_train_holidiff.py
+  exp03_eval_overall.py
+  exp04_eval_holiday_fujian.py
+  exp05_ablation_modules.py
+  exp06_eval_aggregation.py
+  exp07_sensitivity_efficiency.py
+  exp08_export_prediction_cases.py
+  exp09_export_sampling_cloud.py
+```
+
+| 脚本 | 论文目标 | 输出 |
+|---|---|---|
+| `exp01_shift_score.py` | Fig. 3 | `outputs/exp01_shift_score/shift_scores.csv` |
+| `exp02_train_holidiff.py` | 主模型 checkpoint | `checkpoints/paper/{dataset}/best.pt` |
+| `exp03_eval_overall.py` | Table IV | `outputs/exp03_eval_overall/table_overall.csv` |
+| `exp04_eval_holiday_fujian.py` | Table V / VI | `table_holiday.csv`, `table_peak.csv` |
+| `exp05_ablation_modules.py` | Table VII | `table_ablation.csv` |
+| `exp06_eval_aggregation.py` | Table IX | `table_aggregation.csv` |
+| `exp07_sensitivity_efficiency.py` | Table X / XI | `table_sensitivity.csv`, `table_efficiency.csv` |
+| `exp08_export_prediction_cases.py` | Fig. 4 数据 | `cases_regular_holiday.npz` |
+| `exp09_export_sampling_cloud.py` | Fig. 6 数据 | `sampling_cloud_case.npz` |
+
+### 9.2 plot 目录
+
+```text
+plot/
+  plot01_shift_score.py
+  plot02_prediction_cases.py
+  plot03_frequency_decomposition.py
+  plot04_sampling_kde.py
+  plot05_sensitivity_efficiency.py
+```
+
+| 脚本 | 输入 | 输出 |
+|---|---|---|
+| `plot01_shift_score.py` | `shift_scores.csv` | `figures/fig3_shift_score.pdf` |
+| `plot02_prediction_cases.py` | `cases_regular_holiday.npz` | `figures/fig4_prediction_cases.pdf` |
+| `plot03_frequency_decomposition.py` | frequency case outputs | `figures/fig5_frequency_decomposition.pdf` |
+| `plot04_sampling_kde.py` | `sampling_cloud_case.npz` | `figures/fig6_sampling_kde.pdf` |
+| `plot05_sensitivity_efficiency.py` | sensitivity / efficiency csv | sensitivity figure |
+
+---
+
+## 10. 配置文件建议
+
+论文主配置只保留少量可复现 YAML：
+
+```text
+configs/
+  paper/
+    fujian30_holidiff.yaml
+    pems03_holidiff.yaml
+    pems04_holidiff.yaml
+    pems08_holidiff.yaml
+
+  ablation/
+    fujian30_wo_lstde.yaml
+    fujian30_wo_trend.yaml
+    fujian30_wo_sfcn.yaml
+    fujian30_agg_mean.yaml
+    fujian30_agg_median.yaml
+    fujian30_agg_mom.yaml
+```
+
+主配置推荐：
+
+```yaml
+model:
+  name: HoliDiff
+  use_holiday_flag: false
+
+lstde:
+  enabled: true
+  decomposer: fixed_fft
+  num_bands: 4
+  patch_len: 12
+  patch_embed: trend_aware_concat
+
+sfcn:
+  enabled: true
+  alpha: learnable
+  init_alpha: 0.05
+
+residual:
+  enabled: true
+  type: hybrid_trend_residual
+  eta: 0.5
+  lambda_time: 1.0   # if frequency residual is not yet implemented
+
+aggregation:
+  type: dca
+  num_samples: 10
+
+diffusion:
+  steps: 100
+```
+
+说明：
+
+- `use_holiday_flag: false` 明确论文主模型不使用节假日条件输入；
+- `lambda_time: 1.0` 表示当前实现若仅保留时间趋势残差，则是 Hybrid Residual 的简化版本；
+- 后续若补充频带趋势残差，可将 `lambda_time` 调整为 \([0,1]\) 内的混合系数。
+
+---
+
+## 11. 清理优先级
+
+### 11.1 第一阶段：主路径固定
+
+优先修改：
+
+```text
+models/HoliDiff.py
+macro/aggregation_factory.py
+exp/ entry scripts
+```
+
+目标：HoliDiff 主路径只包含：
+
+```text
+LSTDE -> SFCN -> Conditional Diffusion -> Hybrid Residual -> DCA
+```
+
+### 11.2 第二阶段：模块目录收敛
+
+建议最终目录：
+
+```text
+models/
+  holidiff.py
+  diffusion.py
+  denoiser.py
+
+  frequency/
+    decompose.py
+    patch_embed.py
+    residual.py
+
+  micro/
+    sfcn.py
+
+  macro/
+    dca_aggregator.py
+    scp_aggregator.py
+    simple_aggregators.py
+```
+
+### 11.3 第三阶段：legacy 隔离
+
+移动到 legacy：
+
+```text
+legacy/frequency/
+  conditioner.py
+  modulator.py
+  fusion.py
+  spectral_gate.py
+
+legacy/aggregation/
+  abms.py
+  wbp.py
+  rcl.py
+
+legacy/configs/
+legacy/exp/
+```
+
+---
+
+## 12. 当前文档相对旧版的关键修正
+
+1. 删除“以 SimDiff 为基座”的强叙事，SimDiff 只作为重要 baseline，不作为论文方法定义的必要部分。
+2. 删除“严格服从 LWR 方程”或“显式求解基本图”的过强物理表述，改为拓扑传播一致性与宏观状态结构感知。
+3. 删除固定流量区间、TPR、SGFE、Phase-A/D/E 等阶段性实验叙事，避免与论文当前实验表格不一致。
+4. 修正 SFCN 公式：加入度归一化邻接权重，并区分训练时未来统计量与推理时历史统计量。
+5. 修正 DCA 公式：历史相容权重采用 \(\ell_{free}+\ell_{cong}\)，不是 max。
+6. 明确 DCA 是逐点聚合，不是高维轨迹聚类。
+7. 明确 holiday label 不进入模型主路径，仅用于漂移分析与评估。
+8. 明确 SCP、ABMS、WBP、RCL 均不是论文主方法；MoM 仅作为聚合消融 baseline。
+9. 将 exp 与 plot 分离：exp 产出 csv/npz/checkpoint，plot 只读取结果画图。
+

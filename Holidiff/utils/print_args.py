@@ -1,4 +1,9 @@
 def print_args(args):
+    network_profile = getattr(args, 'network_profile', '')
+    if network_profile:
+        network_profile = str(network_profile)
+    else:
+        network_profile = 'custom'
     print("\033[1m" + "Basic Config" + "\033[0m")
     print(f'  {"Task Name:":<20}{args.task_name:<20}{"Is Training:":<20}{args.is_training:<20}')
     print(f'  {"Model ID:":<20}{args.model_id:<20}{"Model:":<20}{args.model:<20}')
@@ -29,14 +34,15 @@ def print_args(args):
         print()
 
     print("\033[1m" + "Model Parameters" + "\033[0m")
-    print(f'  {"Top k:":<20}{args.top_k:<20}{"Num Kernels:":<20}{args.num_kernels:<20}')
-    print(f'  {"Enc In:":<20}{args.enc_in:<20}{"Dec In:":<20}{args.dec_in:<20}')
-    print(f'  {"C Out:":<20}{args.c_out:<20}{"d model:":<20}{args.d_model:<20}')
-    print(f'  {"n heads:":<20}{args.n_heads:<20}{"e layers:":<20}{args.e_layers:<20}')
-    print(f'  {"d layers:":<20}{args.d_layers:<20}{"d FF:":<20}{args.d_ff:<20}')
-    print(f'  {"Moving Avg:":<20}{args.moving_avg:<20}{"Factor:":<20}{args.factor:<20}')
-    print(f'  {"Distil:":<20}{args.distil:<20}{"Dropout:":<20}{args.dropout:<20}')
-    print(f'  {"Embed:":<20}{args.embed:<20}{"Activation:":<20}{args.activation:<20}')
+    print(f'  {"Network Profile:":<20}{network_profile:<20}{"Top k:":<20}{args.top_k:<20}')
+    print(f'  {"Num Kernels:":<20}{args.num_kernels:<20}{"Enc In:":<20}{args.enc_in:<20}')
+    print(f'  {"Dec In:":<20}{args.dec_in:<20}{"C Out:":<20}{args.c_out:<20}')
+    print(f'  {"d model:":<20}{args.d_model:<20}{"n heads:":<20}{args.n_heads:<20}')
+    print(f'  {"e layers:":<20}{args.e_layers:<20}{"d layers:":<20}{args.d_layers:<20}')
+    print(f'  {"d FF:":<20}{args.d_ff:<20}{"Moving Avg:":<20}{args.moving_avg:<20}')
+    print(f'  {"Factor:":<20}{args.factor:<20}{"Distil:":<20}{args.distil:<20}')
+    print(f'  {"Dropout:":<20}{args.dropout:<20}{"Embed:":<20}{args.embed:<20}')
+    print(f'  {"Activation:":<20}{args.activation:<20}')
     if hasattr(args, 'output_attention'):
         print(f'  {"Output Attention:":<20}{args.output_attention:<20}')
     print()
