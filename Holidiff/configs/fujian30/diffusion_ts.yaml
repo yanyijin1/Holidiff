@@ -3,61 +3,57 @@ is_training: 1
 model_id: Fujian30_96_12_DiffusionTS
 model: DiffusionTS
 
+# dataset
 data: fujian30
-root_path: C:/Project/YYJ/Holidiff/Holidiff/data/fujian-30
+root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
 data_path: fujian30_clean.csv
 features: M
 target: traffic_flow
 freq: 15min
-checkpoints: C:/Project/YYJ/Holidiff/Holidiff/checkpoints/
+checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
 
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
+adj_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30/adjacent_gantry.csv
+scale: true
+mode: standard
+
+# forecasting window
 seq_len: 96
 label_len: 48
 pred_len: 12
 seasonal_patterns: Monthly
 inverse: false
-
-expand: 2
-d_conv: 4
-top_k: 5
-num_kernels: 6
-num_heads: 8
 enc_in: 30
 dec_in: 30
 c_out: 30
+
+# minimal host compatibility fields
+network_profile: base
 d_model: 128
 n_heads: 8
 e_layers: 1
 d_layers: 1
 d_ff: 512
-moving_avg: 25
+expand: 2
+d_conv: 4
 factor: 1
+embed: timeF
 distil: true
 dropout: 0.0
-skip_dropout: 0.0
-embed: timeF
 activation: gelu
-channel_independence: 1
-decomp_method: moving_avg
-use_norm: 1
-down_sampling_layers: 0
-down_sampling_window: 1
-down_sampling_method: null
-seg_len: 48
-stride: 1
-patch_len: 12
-patch_embed_mode: trend_aware_concat
+top_k: 5
+num_kernels: 6
 
-# Keep the existing exp/test branch in diffusion mode. DiffusionTSAdapter
-# handles training through its original reconstruction + Fourier objective.
+# DiffusionTS core params
 is_diff: 1
 loss_type: MAE
-
-# Diffusion-TS original-style parameters.
 diffusion_ts_seq_length: 108
 diffusion_ts_feature_size: 30
 diffusion_ts_timesteps: 1000
-diffusion_ts_sampling_timesteps: 50
+diffusion_ts_sampling_timesteps: 20
 diffusion_ts_loss_type: l1
 diffusion_ts_beta_schedule: cosine
 diffusion_ts_n_layer_enc: 3
@@ -70,82 +66,17 @@ diffusion_ts_attn_pd: 0.0
 diffusion_ts_resid_pd: 0.0
 diffusion_ts_use_ff: true
 diffusion_ts_reg_weight: null
-diffusion_ts_use_ema: true
-diffusion_ts_ema_decay: 0.995
-diffusion_ts_ema_update_every: 10
 
-# Evaluation sampling. Keep one sample for a clean baseline comparison.
+# evaluation / sampling
 sample_times: 1
 vs_times: 1
 
-# HATEK-only parameters kept for parser/print compatibility.
-coss: 0.008
-rmom: 1
-n_b: 1
-s_steps: 50
-skip_type: time_uniform
-method: multistep
-lower_order_final: true
-order: 2
-diff_steps: 1000
-use_mom: 0
-aggregation_mode: simple
-density_bandwidth: 15.0
-density_eps: 1.0e-8
-dca_bandwidth_kde: 15.0
-dca_bandwidth_hist: 20.0
-dca_mode: joint
-abms_m_neighbor: 3
-abms_max_iter: 10
-abms_tol: 0.001
-rcl_bandwidth_hist: 20.0
-rcl_mode: soft
-scp_lambda_skew: 0.5
-mom_version: baseline
-mom_alpha: 0.4
-mom_topk: 3
-mom_trend_temp: 5.0
-mom_lambda: 0.7
-physical_injection_enable: false
-physical_residual_enable: false
-physical_residual_eta: 0.0
-physical_free_flow_epsilon: 0.0
-frequency_enable: false
-frequency_decomp_type: fixed_fft
-frequency_num_bands: 4
-frequency_patch_embed_mode: band_trend
-frequency_patch_embed_fusion: concat_proj
-frequency_patch_embed_num_bands: 4
-frequency_injection_mode: none
-frequency_residual_type: none
-frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
-frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
-frequency_use_softplus_eta: true
-frequency_hybrid_mix_alpha: 0.5
-phase_e_enable: false
-phase_e_target_adapter: vanilla_ni
-phase_e_revin_adapter: vanilla_revin
-phase_e_graph_mode: directed
-phase_e_adj_file: adjacent_gantry.csv
-phase_e_zeta_init: 0.05
-phase_e_edge_var_window: 720
-phase_e_field_stats_source: future
-phase_e_field_eta: 0.1
-phase_e_use_edge_sigma_fallback: false
-holiday_enable: false
-holiday_mode: none
-holiday_alpha_delta: 0.05
-holiday_hard_alpha: 0.10
-holiday_dropout_prob: 0.0
-holiday_dual_bank_enable: false
-new_norm: 1
-use_shuffle: 1
-use_first: 0
-
+# run
 num_workers: 0
 itr: 1
 train_epochs: 1
 batch_size: 32
+eval_batch_size: 128
 patience: 10
 learning_rate: 0.0001
 des: DiffusionTS
@@ -153,31 +84,15 @@ loss: MSE
 lradj: type1
 use_amp: false
 
+# device
 use_gpu: true
 gpu: 0
 use_multi_gpu: false
 devices: '0'
 
-p_hidden_dims: [128, 128]
-p_hidden_layers: 2
-use_dtw: false
-augmentation_ratio: 0
+# seed / eval
 seed: 2021
-scale: true
-jitter: false
-scaling: false
-permutation: false
-randompermutation: false
-magwarp: false
-timewarp: false
-windowslice: false
-windowwarp: false
-rotation: false
-spawner: false
-dtwwarp: false
-shapedtwwarp: false
-wdba: false
-discdtw: false
-discsdtw: false
-extra_tag: ''
-mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5

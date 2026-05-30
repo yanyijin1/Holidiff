@@ -16,8 +16,9 @@ if str(ROOT) not in sys.path:
 import numpy as np
 import torch
 
-from Holidiff.exp.exp_long_term_forecasting import Exp_Long_Term_Forecast
+from Holidiff.exp import Exp_Long_Term_Forecast
 from Holidiff.utils.print_args import print_args
+from Holidiff.utils.run_artifacts import build_run_name, log_path
 
 try:
     import yaml
@@ -63,15 +64,7 @@ NETWORK_PROFILES = {
 
 
 CONFIG_ALIAS_PAIRS = [
-    ('frequency_patch_fusion', 'frequency_patch_embed_fusion'),
-    ('frequency_patch_num_bands', 'frequency_patch_embed_num_bands'),
     ('physical_residual_free_flow_epsilon', 'physical_free_flow_epsilon'),
-    ('spatial_field_enable', 'phase_e_enable'),
-    ('spatial_graph_file', 'phase_e_adj_file'),
-    ('spatial_field_coupling_init', 'phase_e_zeta_init'),
-    ('spatial_field_variance_window', 'phase_e_edge_var_window'),
-    ('spatial_field_stats_source', 'phase_e_field_stats_source'),
-    ('local_scaling_enable', 'new_norm'),
 ]
 
 
@@ -184,44 +177,6 @@ class _TeeStream:
                 reconfigure(**kwargs)
 
 
-def _build_run_name(args, ii):
-    base_name = str(getattr(args, 'version', '') or '').strip()
-    if base_name:
-        if getattr(args, 'itr', 1) > 1:
-            return f'{base_name}_{ii}'
-        return base_name
-    run_tag = args.des
-    model_width = getattr(args, 'network_profile', '') or getattr(args, 'd_model', 'na')
-    return '{}_{}_{}_{}_ft{}_sl{}_ll{}_pl{}_net{}_dm{}_nh{}_el{}_dl{}_df{}_expand{}_dc{}_fc{}_eb{}_dt{}_{}_{}'.format(
-        args.task_name,
-        args.model_id,
-        args.model,
-        args.data,
-        args.features,
-        args.seq_len,
-        args.label_len,
-        args.pred_len,
-        model_width,
-        args.d_model,
-        args.n_heads,
-        args.e_layers,
-        args.d_layers,
-        args.d_ff,
-        args.expand,
-        args.d_conv,
-        args.factor,
-        args.embed,
-        args.distil,
-        run_tag, ii)
-
-
-def _init_run_log(run_name):
-    log_dir = ROOT / 'logs'
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f'{run_name}.log'
-    return log_path
-
-
 if __name__ == '__main__':
     base_parser = _build_parser()
     base_args, _ = base_parser.parse_known_args()
@@ -264,16 +219,16 @@ if __name__ == '__main__':
     if args.is_training:
         for ii in range(args.itr):
             exp = Exp(args)
-            run_name = _build_run_name(args, ii)
-            log_path = _init_run_log(run_name)
+            run_name = build_run_name(args, ii)
+            current_log_path = log_path(run_name)
 
-            with open(log_path, 'a', encoding='utf-8') as log_file:
+            with open(current_log_path, 'a', encoding='utf-8') as log_file:
                 original_stdout, original_stderr = sys.stdout, sys.stderr
                 sys.stdout = _TeeStream(original_stdout, log_file)
                 sys.stderr = _TeeStream(original_stderr, log_file)
                 try:
                     print(f'[run] version={run_name}', flush=True)
-                    print(f'[run] auto log path: {log_path}', flush=True)
+                    print(f'[run] auto log path: {current_log_path}', flush=True)
                     print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(run_name), flush=True)
                     exp.train(run_name)
 
@@ -286,16 +241,16 @@ if __name__ == '__main__':
     else:
         ii = 0
         exp = Exp(args)
-        run_name = _build_run_name(args, ii)
-        log_path = _init_run_log(run_name)
+        run_name = build_run_name(args, ii)
+        current_log_path = log_path(run_name)
 
-        with open(log_path, 'a', encoding='utf-8') as log_file:
+        with open(current_log_path, 'a', encoding='utf-8') as log_file:
             original_stdout, original_stderr = sys.stdout, sys.stderr
             sys.stdout = _TeeStream(original_stdout, log_file)
             sys.stderr = _TeeStream(original_stderr, log_file)
             try:
                 print(f'[run] version={run_name}', flush=True)
-                print(f'[run] auto log path: {log_path}', flush=True)
+                print(f'[run] auto log path: {current_log_path}', flush=True)
                 print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(run_name), flush=True)
                 exp.test(run_name, test=1)
             finally:

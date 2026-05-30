@@ -1,3 +1,3 @@
-from .HoliDiff import HATEK
+from .models.HoliDiff import HATEK
 
 __all__ = ['HATEK']

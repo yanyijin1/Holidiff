@@ -1,11 +1,14 @@
 from Holidiff.data_provider.data_factory import data_provider
+from Holidiff.data_provider.traffic_warehouse_loader import load_adj
 from Holidiff.exp.exp_basic import Exp_Basic
 from Holidiff.utils.tools import EarlyStopping, adjust_learning_rate
 from Holidiff.utils.eval_holiday import evaluate_all
+from Holidiff.utils.run_artifacts import checkpoint_dir, checkpoint_path, result_json_path, result_text_path, test_result_dir
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import optim
+from torch.utils.data import DataLoader, Dataset
 import os
 import time
 import json
@@ -25,9 +28,36 @@ except Exception:
 warnings.filterwarnings('ignore')
 
 
+class _TSDiffWinDataset(Dataset):
+    def __init__(self, pack):
+        self.x = pack['x']
+        self.y = pack['y']
+        self.m = pack['mask']
+        self.h = pack['holiday']
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, i):
+        x = torch.from_numpy(self.x[i]).float()
+        y = torch.from_numpy(self.y[i]).float()
+        m = torch.from_numpy(self.m[i]).float()
+        h = torch.from_numpy(self.h[i]).float()
+        x_mark = torch.zeros(x.shape[0], 1)
+        y_mark = torch.zeros(x.shape[0] + y.shape[0], 1)
+        return x, y, x_mark, y_mark, m, h
+
+
 class Exp2Forecast12H(Exp_Basic):
+
+    # ---------------------------------------------------------------------
+    # model / data entry
+    # ---------------------------------------------------------------------
     def __init__(self, args):
         super(Exp2Forecast12H, self).__init__(args)
+
+    def _is_tsdiff_model(self):
+        return str(getattr(self.args, 'model', '')).lower() == 'tsdiff'
 
     def _build_model(self):
         model = self.model_dict[self.args.model](self.args).float()
@@ -35,10 +65,84 @@ class Exp2Forecast12H(Exp_Basic):
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
 
+    def _make_tsdiff_splits(self):
+        csv_path = os.path.join(self.args.root_path, self.args.data_path)
+        df = pd.read_csv(csv_path)
+        time_col = getattr(self.args, 'time_col', 'time_slot')
+        node_col = getattr(self.args, 'node_col', 'station_index')
+        target_col = getattr(self.args, 'target_col', 'traffic_flow')
+        holiday_col = getattr(self.args, 'holiday_col', 'is_holiday')
+        df[time_col] = pd.to_datetime(df[time_col])
+        if holiday_col not in df.columns:
+            df[holiday_col] = 0.0
+        df = df.sort_values([time_col, node_col]).reset_index(drop=True)
+        piv = df.pivot(index=time_col, columns=node_col, values=target_col).sort_index()
+        raw = piv.values.astype(np.float32)
+        valid = (np.isfinite(raw) & (raw > 0)).astype(np.float32)
+        raw = pd.DataFrame(raw).mask(~np.isfinite(raw) | (raw <= 0)).interpolate(axis=0, limit_direction='both').ffill().bfill().values.astype(np.float32)
+        holiday = df.groupby(time_col).first().sort_index()[holiday_col].values.astype(np.float32)
+        T, _ = raw.shape
+        ctx, pred = int(self.args.seq_len), int(self.args.pred_len)
+        tr = int(T * 0.7)
+        va = int(T * 0.8)
+        mean, std = raw[:tr].mean(0, keepdims=True), raw[:tr].std(0, keepdims=True)
+        std[std < 1e-5] = 1.0
+        data = ((raw - mean) / std).astype(np.float32) if getattr(self.args, 'scale', True) else raw
+        starts = {'train': [], 'val': [], 'test': []}
+        for s in range(T - ctx - pred + 1):
+            e = s + ctx + pred
+            if e <= tr:
+                starts['train'].append(s)
+            elif tr <= s and e <= va:
+                starts['val'].append(s)
+            elif va <= s:
+                starts['test'].append(s)
+        packs = {}
+        for k, ss in starts.items():
+            packs[k] = {'x': [], 'y': [], 'mask': [], 'holiday': [], 'indices': np.asarray(ss, dtype=np.int64)}
+            for s in ss:
+                e, p = s + ctx, s + ctx + pred
+                packs[k]['x'].append(data[s:e])
+                packs[k]['y'].append(data[e:p])
+                packs[k]['mask'].append(valid[e:p])
+                packs[k]['holiday'].append(holiday[e:p])
+            for kk in ('x', 'y', 'mask', 'holiday'):
+                packs[k][kk] = np.stack(packs[k][kk]).astype(np.float32) if packs[k][kk] else np.empty((0,), dtype=np.float32)
+        return packs, mean, std, piv.columns.to_numpy()
+
     def _get_data(self, flag):
+        if self._is_tsdiff_model():
+            if not hasattr(self, '_tsdiff_cache'):
+                packs, mean, std, stations = self._make_tsdiff_splits()
+                self._tsdiff_cache = {
+                    'packs': packs,
+                    'mean': mean,
+                    'std': std,
+                    'stations': stations,
+                }
+            pack = self._tsdiff_cache['packs'][flag]
+            data_set = _TSDiffWinDataset(pack)
+            data_set.scale = bool(getattr(self.args, 'scale', True))
+            data_set.scaler = type('Scaler', (), {'mean': self._tsdiff_cache['mean'], 'std': self._tsdiff_cache['std']})()
+            data_set.indices = pack['indices'].tolist()
+            data_set.adj = torch.from_numpy(load_adj(getattr(self.args, 'adj_path', os.path.join(self.args.root_path, 'adjacent_gantry.csv')), default_num_nodes=len(self._tsdiff_cache['stations']))).float()
+            shuffle_flag = flag == 'train'
+            data_loader = DataLoader(
+                data_set,
+                batch_size=self.args.batch_size,
+                shuffle=shuffle_flag,
+                num_workers=self.args.num_workers,
+                drop_last=False,
+            )
+            print(flag, len(data_set))
+            return data_set, data_loader
         data_set, data_loader = data_provider(self.args, flag)
         return data_set, data_loader
 
+
+    # ---------------------------------------------------------------------
+    # train-time helpers
+    # ---------------------------------------------------------------------
     def _select_optimizer(self):
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         model_optim = optim.Adam(trainable_params, lr=self.args.learning_rate)
@@ -52,16 +156,8 @@ class Exp2Forecast12H(Exp_Basic):
         else:
             return nn.MSELoss()
 
-    def _process_model_output(self, outputs, is_diff=True):
-        """处理模型输出，确保形状为 (B, pred_len, N)
-        
-        SimDiff在训练时返回 (B, N, pred_len)，评估时返回 (B, pred_len, N)
-        """
-        if is_diff:
-            if outputs.shape[1] == self.args.enc_in and outputs.shape[2] == self.args.pred_len:
-                outputs = outputs.transpose(1, 2)
-        outputs = outputs[:, -self.args.pred_len:, :]
-        return outputs
+    def _core_model(self):
+        return self.model.module if hasattr(self.model, 'module') else self.model
 
     def _masked_loss(self, outputs, target, mask, loss_type='MSE'):
         if mask is None:
@@ -74,9 +170,36 @@ class Exp2Forecast12H(Exp_Basic):
             elem = F.l1_loss(outputs, target, reduction='none')
         return (elem * mask).sum() / mask.sum().clamp(min=1)
 
-    def _core_model(self):
-        return self.model.module if hasattr(self.model, 'module') else self.model
 
+    # ---------------------------------------------------------------------
+    # diffusion / sampling helpers
+    # ---------------------------------------------------------------------
+    def _run_model(self, model, batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=None, holiday_flag=None):
+        if self.args.is_diff:
+            try:
+                return model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=sample_times, holiday_flag=holiday_flag)
+            except TypeError:
+                return model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+        try:
+            return model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=holiday_flag)
+        except TypeError:
+            return model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+
+    def _process_model_output(self, outputs, is_diff=True):
+        """处理模型输出，确保形状为 (B, pred_len, N)
+        
+        SimDiff在训练时返回 (B, N, pred_len)，评估时返回 (B, pred_len, N)
+        """
+        if is_diff:
+            if outputs.shape[1] == self.args.enc_in and outputs.shape[2] == self.args.pred_len:
+                outputs = outputs.transpose(1, 2)
+        outputs = outputs[:, -self.args.pred_len:, :]
+        return outputs
+
+
+    # ---------------------------------------------------------------------
+    # metrics / evaluation helpers
+    # ---------------------------------------------------------------------
     def _safe_spearman(self, x, y):
         if spearmanr is None:
             return np.nan, np.nan
@@ -195,6 +318,10 @@ class Exp2Forecast12H(Exp_Basic):
             handle.write(text)
             handle.write('\n')
 
+
+    # ---------------------------------------------------------------------
+    # validation / training
+    # ---------------------------------------------------------------------
     def vali(self, model, vali_loader, criterion):
         total_loss = []
         model.eval()
@@ -208,13 +335,45 @@ class Exp2Forecast12H(Exp_Basic):
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
+                if self._is_tsdiff_model():
+                    core_model = self._core_model()
+                    loss = core_model.training_loss(batch_x, batch_y.to(self.device))
+                    total_loss.append(loss.item())
+                    continue
+
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-                if self.args.is_diff:
-                    outputs, _ = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
-                else:
-                    outputs = model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                core_model = self._core_model()
+                if hasattr(core_model, 'training_loss'):
+                    try:
+                        loss = core_model.training_loss(
+                            batch_x,
+                            batch_y.to(self.device),
+                            batch_y_mask=batch_y_mask.float().to(self.device) if batch_y_mask is not None else None,
+                            x_mark_enc=batch_x_mark,
+                            x_mark_dec=batch_y_mark,
+                            holiday_flag=batch_holiday.float().to(self.device) if batch_holiday is not None else None,
+                        )
+                    except TypeError:
+                        loss = core_model.training_loss(
+                            batch_x,
+                            batch_y.to(self.device),
+                            batch_y_mask.float().to(self.device) if batch_y_mask is not None else None,
+                        )
+                    total_loss.append(loss.item())
+                    continue
+
+                model_output = self._run_model(
+                    model,
+                    batch_x,
+                    batch_x_mark,
+                    dec_inp,
+                    batch_y_mark,
+                    sample_times=self.args.sample_times,
+                    holiday_flag=batch_holiday,
+                )
+                outputs = model_output[0] if self.args.is_diff else model_output
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -233,7 +392,47 @@ class Exp2Forecast12H(Exp_Basic):
         _, vali_loader = self._get_data(flag='val')
         _, test_loader = self._get_data(flag='test')
 
-        path = os.path.join(self.args.checkpoints, setting)
+        if self._is_tsdiff_model():
+            path = str(checkpoint_dir(self.args.checkpoints, setting))
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+            train_steps = len(train_loader)
+            early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+            model_optim = self._select_optimizer()
+
+            for epoch in range(self.args.train_epochs):
+                epoch_time = time.time()
+                losses = []
+                self.model.train()
+                for i, batch in enumerate(train_loader):
+                    batch_x, batch_y = batch[0].float().to(self.device), batch[1].float().to(self.device)
+                    model_optim.zero_grad()
+                    core_model = self._core_model()
+                    loss = core_model.training_loss(batch_x, batch_y)
+                    loss.backward()
+                    model_optim.step()
+                    losses.append(float(loss.detach().cpu()))
+                    log_interval = max(1, int(getattr(self.args, 'log_interval', 100)))
+                    if (i + 1) % log_interval == 0:
+                        print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, losses[-1]), flush=True)
+                print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
+                train_loss = float(np.mean(losses)) if losses else 0.0
+                vali_loss = self.vali(self.model, vali_loader, None)
+                test_loss = vali_loss
+                print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
+                    epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+                early_stopping(vali_loss, self.model, path)
+                if early_stopping.early_stop:
+                    print("Early stopping")
+                    break
+                adjust_learning_rate(model_optim, epoch + 1, self.args)
+
+            best_model_path = path + '/' + 'checkpoint.pth'
+            self.model.load_state_dict(torch.load(best_model_path))
+            return self.model
+
+        path = str(checkpoint_dir(self.args.checkpoints, setting))
         if not os.path.exists(path):
             os.makedirs(path)
 
@@ -265,25 +464,47 @@ class Exp2Forecast12H(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-                if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.sample_times, holiday_flag=batch_holiday)
+                core_model = self._core_model()
+                if hasattr(core_model, 'training_loss'):
+                    try:
+                        loss = core_model.training_loss(
+                            batch_x,
+                            batch_y,
+                            batch_y_mask=batch_y_mask,
+                            x_mark_enc=batch_x_mark,
+                            x_mark_dec=batch_y_mark,
+                            holiday_flag=batch_holiday,
+                        )
+                    except TypeError:
+                        loss = core_model.training_loss(batch_x, batch_y, batch_y_mask)
+                    outputs = None
                 else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                    model_output = self._run_model(
+                        self.model,
+                        batch_x,
+                        batch_x_mark,
+                        dec_inp,
+                        batch_y_mark,
+                        sample_times=self.args.sample_times,
+                        holiday_flag=batch_holiday,
+                    )
+                    outputs = model_output[0] if self.args.is_diff else model_output
 
-                outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
-                batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
+                    outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
+                    batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
 
-                loss = self._masked_loss(outputs, batch_y, batch_y_mask, self.args.loss_type)
+                    loss = self._masked_loss(outputs, batch_y, batch_y_mask, self.args.loss_type)
                 if epoch == 0 and i == 0 and batch_y_mask is not None:
                     print('\t[mask] valid ratio: {:.4f}, zero elements: {}/{} (first batch)'.format(
                         batch_y_mask.mean().item(), int((batch_y_mask == 0).sum().item()), batch_y_mask.numel()))
                 train_loss.append(loss.item())
 
-                if (i + 1) % 100 == 0:
-                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()))
+                log_interval = max(1, int(getattr(self.args, 'log_interval', 100)))
+                if (i + 1) % log_interval == 0:
+                    print("\titers: {0}, epoch: {1} | loss: {2:.7f}".format(i + 1, epoch + 1, loss.item()), flush=True)
                     speed = (time.time() - time_now) / iter_count
                     left_time = speed * ((self.args.train_epochs - epoch) * train_steps - i)
-                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
+                    print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time), flush=True)
                     iter_count = 0
                     time_now = time.time()
 
@@ -292,6 +513,8 @@ class Exp2Forecast12H(Exp_Basic):
                 if physical_module is not None and hasattr(physical_module, 'record_eta_gradients'):
                     physical_module.record_eta_gradients()
                 model_optim.step()
+                if hasattr(core_model, 'after_optimizer_step'):
+                    core_model.after_optimizer_step()
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
@@ -310,18 +533,94 @@ class Exp2Forecast12H(Exp_Basic):
         self.model.load_state_dict(torch.load(best_model_path))
         return self.model
 
+
+    # ---------------------------------------------------------------------
+    # test / sampling
+    # ---------------------------------------------------------------------
     def test(self, setting, test=0):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
 
+        if self._is_tsdiff_model():
+            if test:
+                if getattr(self.args, 'load_checkpoint', ''):
+                    checkpoint_path_value = self.args.load_checkpoint
+                else:
+                    checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting))
+                print('loading model from', checkpoint_path_value)
+                self._load_checkpoint_compat(checkpoint_path_value)
+
+            self.model.eval()
+            preds = []
+            trues = []
+            all_masks = []
+            all_histories = []
+            all_holidays = []
+
+            with torch.no_grad():
+                for batch in test_loader:
+                    batch_x = batch[0].float().to(self.device)
+                    batch_y = batch[1].float()
+                    batch_y_mask = batch[4] if len(batch) > 4 else None
+                    batch_holiday = batch[5] if len(batch) > 5 else None
+                    core_model = self._core_model()
+                    pred = core_model._sample_once(
+                        batch_x,
+                        int(getattr(self.args, 'tsdiff_sampling_steps', 20)),
+                        float(getattr(self.args, 'tsdiff_guidance_scale', 1.0)),
+                        float(getattr(self.args, 'tsdiff_guidance_clip', 10.0)),
+                    ).detach().cpu().numpy()
+                    true = batch_y[:, -self.args.pred_len:, :].numpy()
+                    preds.append(pred)
+                    trues.append(true)
+                    all_histories.append(batch_x.detach().cpu().numpy())
+                    if batch_y_mask is not None:
+                        all_masks.append(batch_y_mask.detach().cpu().numpy())
+                    if batch_holiday is not None:
+                        all_holidays.append(batch_holiday.detach().cpu().numpy())
+
+            preds = np.concatenate(preds, axis=0)
+            trues = np.concatenate(trues, axis=0)
+            masks = np.concatenate(all_masks, axis=0) if all_masks else None
+            holidays = np.concatenate(all_holidays, axis=0) if all_holidays else None
+            histories = np.concatenate(all_histories, axis=0)
+            print('test shape:', preds.shape, trues.shape)
+
+            if masks is not None:
+                mae = (np.abs(preds - trues) * masks).sum() / max(masks.sum(), 1)
+                mse = ((preds - trues) ** 2 * masks).sum() / max(masks.sum(), 1)
+            else:
+                mae = np.mean(np.abs(preds - trues))
+                mse = np.mean((preds - trues) ** 2)
+            rmse = np.sqrt(mse)
+            basic_metrics = {'mae': mae, 'mse': mse, 'rmse': rmse}
+            extra_metrics = self._compute_extra_metrics(preds, trues, histories, holidays, masks, test_data)
+
+            results_txt_path = result_text_path(setting)
+            with open(results_txt_path, 'a', encoding='utf-8') as f:
+                f.write(setting + "  \n")
+                self._print_and_write_metrics(f, basic_metrics, extra_metrics)
+                f.write('\n')
+
+            metrics_path = result_json_path(setting)
+            metrics_payload = {
+                'setting': setting,
+                'basic': {k: float(v) for k, v in basic_metrics.items()},
+                'extra': extra_metrics,
+            }
+            with open(metrics_path, 'w', encoding='utf-8') as f:
+                json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
+
+            return mae, mse, rmse
+
         if test:
             if getattr(self.args, 'load_checkpoint', ''):
-                checkpoint_path = self.args.load_checkpoint
+                checkpoint_path_value = self.args.load_checkpoint
             else:
-                checkpoint_path = os.path.join(self.args.checkpoints + setting, 'checkpoint.pth')
-            print('loading model from', checkpoint_path)
-            self._load_checkpoint_compat(checkpoint_path)
+                checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting))
+            print('loading model from', checkpoint_path_value)
+            self._load_checkpoint_compat(checkpoint_path_value)
 
         core_model = self._core_model()
         if hasattr(core_model, '_mom_kwargs') and hasattr(test_data, 'scaler') and hasattr(test_data.scaler, 'mean'):
@@ -335,7 +634,7 @@ class Exp2Forecast12H(Exp_Basic):
         all_masks = []
         all_histories = []
         all_holidays = []
-        folder_path = './test_results/' + setting + '/'
+        folder_path = str(test_result_dir(setting))
         diag_path = os.path.join(folder_path, 'diagnostics')
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
@@ -356,10 +655,16 @@ class Exp2Forecast12H(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
-                if self.args.is_diff:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=self.args.vs_times, holiday_flag=batch_holiday)
-                else:
-                    outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, holiday_flag=batch_holiday)
+                model_output = self._run_model(
+                    self.model,
+                    batch_x,
+                    batch_x_mark,
+                    dec_inp,
+                    batch_y_mark,
+                    sample_times=self.args.vs_times,
+                    holiday_flag=batch_holiday,
+                )
+                outputs = model_output[0] if self.args.is_diff else model_output
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
                 batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
@@ -393,16 +698,14 @@ class Exp2Forecast12H(Exp_Basic):
         basic_metrics = {'mae': mae, 'mse': mse, 'rmse': rmse}
         extra_metrics = self._compute_extra_metrics(preds, trues, histories, holidays, masks, test_data)
 
-        folder_path = './results/'
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
+        results_txt_path = result_text_path(setting)
 
-        with open(os.path.join(folder_path, setting + ".txt"), 'a', encoding='utf-8') as f:
+        with open(results_txt_path, 'a', encoding='utf-8') as f:
             f.write(setting + "  \n")
             self._print_and_write_metrics(f, basic_metrics, extra_metrics)
             f.write('\n')
 
-        metrics_path = os.path.join(folder_path, setting + ".json")
+        metrics_path = result_json_path(setting)
         metrics_payload = {
             'setting': setting,
             'basic': {k: float(v) for k, v in basic_metrics.items()},
@@ -412,6 +715,9 @@ class Exp2Forecast12H(Exp_Basic):
             json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
 
         return mae, mse, rmse
+
+
+Exp_Long_Term_Forecast = Exp2Forecast12H
 
 
 Exp_Long_Term_Forecast = Exp2Forecast12H

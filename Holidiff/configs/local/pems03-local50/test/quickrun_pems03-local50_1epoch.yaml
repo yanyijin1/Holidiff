@@ -69,11 +69,11 @@ dca_mode: joint
 physical_injection_enable: true
 physical_residual_enable: true
 physical_residual_eta: 0.5
-physical_residual_free_flow_epsilon: 0.0
+physical_free_flow_epsilon: 0.0
 frequency_enable: true
 frequency_num_bands: 4
-frequency_patch_fusion: concat_proj
-frequency_patch_num_bands: 4
+frequency_patch_embed_fusion: concat_proj
+frequency_patch_embed_num_bands: 4
 frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
@@ -84,9 +84,6 @@ spatial_field_coupling_init: 0.05
 spatial_field_variance_window: 720
 spatial_field_stats_source: future
 local_scaling_enable: true
-holiday_enable: false
-use_shuffle: 1
-use_first: 0
 
 num_workers: 4
 itr: 1

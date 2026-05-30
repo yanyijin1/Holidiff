@@ -1,6 +1,6 @@
 import os
 import torch
-from Holidiff.HoliDiff import HATEK
+from Holidiff.models import DLinear, DiffusionTS, HATEK, PatchTST, SimDiff, TSDiff, TimesNet, iTransformer
 
 
 class Exp_Basic(object):
@@ -8,6 +8,13 @@ class Exp_Basic(object):
         self.args = args
         self.model_dict = {
             'HATEK': HATEK,
+            'DLinear': DLinear,
+            'PatchTST': PatchTST,
+            'iTransformer': iTransformer,
+            'TimesNet': TimesNet,
+            'SimDiff': SimDiff,
+            'TSDiff': TSDiff,
+            'DiffusionTS': DiffusionTS,
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

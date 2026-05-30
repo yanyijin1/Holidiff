@@ -17,9 +17,14 @@ def data_provider(args, flag):
         )
 
     Data = data_dict[args.data]
-    shuffle_flag = False if flag == 'test' else True
-    drop_last = True
-    batch_size = args.batch_size
+    model_name = str(getattr(args, 'model', '') or '').lower()
+    if model_name == 'tsdiff':
+        shuffle_flag = flag == 'train'
+        drop_last = False
+    else:
+        shuffle_flag = False if flag == 'test' else True
+        drop_last = True
+    batch_size = args.batch_size if flag == 'train' else getattr(args, 'eval_batch_size', args.batch_size)
 
     data_set = Data(
         csv_path=args.root_path + '/' + args.data_path,
@@ -28,7 +33,7 @@ def data_provider(args, flag):
         mode=getattr(args, 'mode', 'standard'),
         input_len=args.seq_len,
         pred_len=args.pred_len,
-        stride=getattr(args, 'stride', 1),
+        stride=getattr(args, 'data_stride', 1),
         scale=getattr(args, 'scale', True),
         target_col=getattr(args, 'target_col', 'traffic_flow'),
         time_col=getattr(args, 'time_col', 'time_slot'),

@@ -76,16 +76,12 @@ frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
-phase_e_enable: true
-phase_e_adj_file: adjacent_gantry.csv
-phase_e_zeta_init: 0.05
-phase_e_edge_var_window: 720
-phase_e_field_stats_source: future
-phase_e_field_eta: 0.1
-holiday_enable: false
-new_norm: 1
-use_shuffle: 1
-use_first: 0
+spatial_field_enable: true
+spatial_graph_file: adjacent_gantry.csv
+spatial_field_coupling_init: 0.05
+spatial_field_variance_window: 720
+spatial_field_stats_source: future
+local_scaling_enable: 1
 
 num_workers: 4
 itr: 1

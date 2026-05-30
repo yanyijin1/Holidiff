@@ -228,25 +228,25 @@ def _build_field_stats_provider(configs) -> FieldStatsProvider:
     return FieldStatsProvider(
         root_path=getattr(configs, 'root_path', ''),
         enc_in=int(getattr(configs, 'enc_in', 30)),
-        adj_file=getattr(configs, 'phase_e_adj_file', 'adjacent_gantry.csv'),
+        adj_file=getattr(configs, 'spatial_graph_file', 'adjacent_gantry.csv'),
     )
 
 
 def build_target_adapter(configs):
-    phase_e_enable = bool(getattr(configs, 'phase_e_enable', False))
-    if phase_e_enable:
+    spatial_field_enable = bool(getattr(configs, 'spatial_field_enable', False))
+    if spatial_field_enable:
         provider = _build_field_stats_provider(configs)
         return SFCN(
             adj=provider.load_graph(),
-            coupling_init=float(getattr(configs, 'phase_e_zeta_init', 0.05)),
-            edge_var_window=int(getattr(configs, 'phase_e_edge_var_window', 720)),
-            field_stats_source=getattr(configs, 'phase_e_field_stats_source', 'future'),
+            coupling_init=float(getattr(configs, 'spatial_field_coupling_init', 0.05)),
+            edge_var_window=int(getattr(configs, 'spatial_field_variance_window', 720)),
+            field_stats_source=getattr(configs, 'spatial_field_stats_source', 'future'),
         )
     return VanillaNIAdapter()
 
 
 def build_revin_adapter(configs):
-    enabled = bool(getattr(configs, 'new_norm', 0))
+    enabled = bool(getattr(configs, 'local_scaling_enable', 0))
     num_features = int(getattr(configs, 'enc_in', 1))
     if not enabled:
         return IdentityLocalScaling()

@@ -1,3 +1,0 @@
-long_term_forecast_msst_speed_96_12_SimDiff_custom_ftM_sl96_ll48_pl12_dm128_nh8_el1_dl1_df256_expand2_dc4_fc1_ebtimeF_dtTrue_msst_speed_seed42_0  
-mse:0.765218198299408, mae:0.6146998405456543, dtw:-999
-
