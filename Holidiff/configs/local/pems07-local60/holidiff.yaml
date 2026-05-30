@@ -1,15 +1,22 @@
 task_name: long_term_forecast
 is_training: 1
-model_id: Fujian30_96_12_CSDI
-model: CSDI
+version: ''
+model_id: PEMS07-Local60_96_12
+model: HATEK
 
-data: fujian30
-root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
-data_path: fujian30_clean.csv
+data: traffic_warehouse
+root_path: /root/yanyijin/STdiff/Holidiff/data/PEMS07-Local60/warehouse
+data_path: clean.csv
+adj_path: /root/yanyijin/STdiff/Holidiff/data/PEMS07-Local60/PEMS07-Local60.csv
 features: M
 target: traffic_flow
-freq: 15min
+freq: 5min
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
+
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
 
 seq_len: 96
 label_len: 48
@@ -17,14 +24,15 @@ pred_len: 12
 seasonal_patterns: Monthly
 inverse: false
 
+network_profile: base
 expand: 2
 d_conv: 4
 top_k: 5
 num_kernels: 6
 num_heads: 8
-enc_in: 30
-dec_in: 30
-c_out: 30
+enc_in: 60
+dec_in: 60
+c_out: 60
 d_model: 128
 n_heads: 8
 e_layers: 1
@@ -34,7 +42,7 @@ moving_avg: 25
 factor: 1
 distil: true
 dropout: 0.0
-skip_dropout: 0.0
+skip_dropout: 0.4
 embed: timeF
 activation: gelu
 channel_independence: 1
@@ -47,92 +55,55 @@ seg_len: 48
 stride: 1
 patch_len: 12
 patch_embed_mode: trend_aware_concat
-
+coss: 5.0
+rmom: 5
+n_b: 5
+sample_times: 50
+vs_times: 10
 is_diff: 1
-loss_type: MAE
-
-# CSDI baseline parameters. Conditional score-based diffusion for forecasting:
-# history is observed (cond_mask=1), future is target (cond_mask=0).
-# Training uses DDPM noise prediction on future portion only.
-# Inference uses reverse diffusion conditioned on history.
-csdi_num_steps: 50
-csdi_layers: 4
-csdi_channels: 64
-csdi_nheads: 8
-csdi_diffusion_embedding_dim: 128
-csdi_beta_start: 0.0001
-csdi_beta_end: 0.5
-csdi_schedule: quad
-csdi_timeemb: 128
-csdi_featureemb: 16
-csdi_use_ema: true
-csdi_ema_decay: 0.995
-csdi_ema_update_every: 10
-
-sample_times: 1
-vs_times: 1
-
-# HATEK-only compatibility keys required by parser/printing.
-coss: 0.008
-rmom: 1
-n_b: 1
-s_steps: 20
-skip_type: time_uniform
+s_steps: 2
+skip_type: time_quadratic
 method: multistep
 lower_order_final: true
 order: 2
-diff_steps: 50
-use_mom: 0
-aggregation_mode: simple
-density_bandwidth: 15.0
-density_eps: 1.0e-8
+diff_steps: 100
+aggregation_mode: mom
 dca_bandwidth_kde: 15.0
 dca_bandwidth_hist: 20.0
 dca_mode: joint
-abms_m_neighbor: 3
-abms_max_iter: 10
-abms_tol: 0.001
-rcl_bandwidth_hist: 20.0
-rcl_mode: soft
-scp_lambda_skew: 0.5
-mom_version: baseline
-mom_alpha: 0.4
-mom_topk: 3
-mom_trend_temp: 5.0
-mom_lambda: 0.7
-physical_injection_enable: false
-physical_residual_enable: false
-physical_residual_eta: 0.0
+physical_injection_enable: true
+physical_residual_enable: true
+physical_residual_eta: 0.5
 physical_free_flow_epsilon: 0.0
-frequency_enable: false
-frequency_decomp_type: fixed_fft
+frequency_enable: true
 frequency_num_bands: 4
-frequency_patch_embed_mode: band_trend
 frequency_patch_embed_fusion: concat_proj
 frequency_patch_embed_num_bands: 4
-frequency_injection_mode: none
-frequency_residual_type: none
 frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
 frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
-spatial_field_enable: false
-spatial_graph_file: adjacent_gantry.csv
+spatial_field_enable: true
+spatial_graph_file: /root/yanyijin/STdiff/Holidiff/data/PEMS07-Local60/PEMS07-Local60.csv
 spatial_field_coupling_init: 0.05
 spatial_field_variance_window: 720
 spatial_field_stats_source: future
-local_scaling_enable: 1
+local_scaling_enable: true
+zero_as_missing: false
+extreme_filter_threshold: null
 
-num_workers: 0
+num_workers: 4
 itr: 1
 train_epochs: 1
 batch_size: 32
 patience: 10
 learning_rate: 0.0001
-des: CSDI
+des: HATEK
 loss: MSE
+loss_type: MAE
 lradj: type1
 use_amp: false
+log_interval: 100
 
 use_gpu: true
 gpu: 0
@@ -162,3 +133,7 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5

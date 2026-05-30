@@ -1,8 +1,8 @@
 task_name: long_term_forecast
 is_training: 1
 version: ''
-model_id: Fujian30_96_12_iTransformer_1epoch
-model: iTransformer
+model_id: Fujian30_96_12_PatchTST
+model: PatchTST
 
 data: fujian30
 root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
@@ -46,7 +46,7 @@ down_sampling_layers: 0
 down_sampling_window: 1
 down_sampling_method: null
 seg_len: 48
-stride: 1
+stride: 12
 patch_len: 12
 data_stride: 1
 
@@ -60,7 +60,7 @@ train_epochs: 1
 batch_size: 32
 patience: 3
 learning_rate: 0.0001
-des: iTransformer
+des: PatchTST
 loss: MSE
 loss_type: MSE
 lradj: type1

@@ -1,8 +1,8 @@
 task_name: long_term_forecast
 is_training: 1
 version: ''
-model_id: Fujian30_96_12_DLinear_1epoch
-model: DLinear
+model_id: Fujian30_96_12_iTransformer
+model: iTransformer
 
 data: fujian30
 root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
@@ -60,7 +60,7 @@ train_epochs: 1
 batch_size: 32
 patience: 3
 learning_rate: 0.0001
-des: DLinear
+des: iTransformer
 loss: MSE
 loss_type: MSE
 lradj: type1

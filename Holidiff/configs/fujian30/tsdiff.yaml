@@ -1,5 +1,6 @@
 task_name: long_term_forecast
 is_training: 1
+version: ''
 model_id: Fujian30_96_12_TSDiff
 model: TSDiff
 
@@ -10,6 +11,12 @@ features: M
 target: traffic_flow
 freq: 15min
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
+
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
+adj_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30/adjacent_gantry.csv
 
 seq_len: 96
 label_len: 48
@@ -136,6 +143,7 @@ des: TSDiff
 loss: MSE
 lradj: type1
 use_amp: false
+log_interval: 100
 
 use_gpu: true
 gpu: 0
@@ -165,3 +173,7 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5

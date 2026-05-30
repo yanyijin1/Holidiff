@@ -1,16 +1,22 @@
 task_name: long_term_forecast
 is_training: 1
 version: ''
-model_id: Fujian30_96_12
+model_id: PEMS08-Local40_96_12
 model: HATEK
 
-data: fujian30
-root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
-data_path: fujian30_clean.csv
+data: traffic_warehouse
+root_path: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/warehouse
+data_path: clean.csv
+adj_path: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/PEMS08-Local40.csv
 features: M
 target: traffic_flow
-freq: 15min
+freq: 5min
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
+
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
 
 seq_len: 96
 label_len: 48
@@ -18,14 +24,15 @@ pred_len: 12
 seasonal_patterns: Monthly
 inverse: false
 
+network_profile: base
 expand: 2
 d_conv: 4
 top_k: 5
 num_kernels: 6
 num_heads: 8
-enc_in: 30
-dec_in: 30
-c_out: 30
+enc_in: 40
+dec_in: 40
+c_out: 40
 d_model: 128
 n_heads: 8
 e_layers: 1
@@ -51,7 +58,7 @@ patch_embed_mode: trend_aware_concat
 coss: 5.0
 rmom: 5
 n_b: 5
-sample_times: 20
+sample_times: 50
 vs_times: 10
 is_diff: 1
 s_steps: 2
@@ -60,7 +67,7 @@ method: multistep
 lower_order_final: true
 order: 2
 diff_steps: 100
-aggregation_mode: dca
+aggregation_mode: mom
 dca_bandwidth_kde: 15.0
 dca_bandwidth_hist: 20.0
 dca_mode: joint
@@ -77,11 +84,13 @@ frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
 frequency_use_softplus_eta: true
 frequency_hybrid_mix_alpha: 0.5
 spatial_field_enable: true
-spatial_graph_file: adjacent_gantry.csv
+spatial_graph_file: /root/yanyijin/STdiff/Holidiff/data/PEMS08-Local40/PEMS08-Local40.csv
 spatial_field_coupling_init: 0.05
 spatial_field_variance_window: 720
 spatial_field_stats_source: future
-local_scaling_enable: 1
+local_scaling_enable: true
+zero_as_missing: false
+extreme_filter_threshold: null
 
 num_workers: 4
 itr: 1
@@ -89,11 +98,12 @@ train_epochs: 1
 batch_size: 32
 patience: 10
 learning_rate: 0.0001
-des: Exp
+des: HATEK
 loss: MSE
 loss_type: MAE
 lradj: type1
 use_amp: false
+log_interval: 100
 
 use_gpu: true
 gpu: 0
@@ -123,3 +133,7 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5

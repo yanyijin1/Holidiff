@@ -12,6 +12,12 @@ target: traffic_flow
 freq: 15min
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
 
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
+adj_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30/adjacent_gantry.csv
+
 seq_len: 96
 label_len: 48
 pred_len: 12
@@ -46,18 +52,18 @@ down_sampling_layers: 0
 down_sampling_window: 1
 down_sampling_method: null
 seg_len: 48
-stride: 8
+stride: 6
 patch_len: 12
 data_stride: 1
 
-# SimDiff original diffusion/sampling defaults.
-coss: 0.008
-rmom: 20
-n_b: 5
-sample_times: 50
+# SimDiff baseline diffusion/sampling defaults for Fujian30 H=12.
+coss: 5
+rmom: 10
+n_b: 3
+sample_times: 10
 vs_times: 10
 is_diff: 1
-s_steps: 5
+s_steps: 3
 skip_type: time_uniform
 method: multistep
 lower_order_final: false
@@ -72,8 +78,8 @@ num_workers: 0
 itr: 1
 train_epochs: 1
 batch_size: 32
-patience: 3
-learning_rate: 0.0001
+patience: 10
+learning_rate: 0.001
 des: SimDiff
 loss: MSE
 loss_type: MSE
@@ -109,3 +115,7 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5

@@ -1,5 +1,6 @@
 task_name: long_term_forecast
 is_training: 1
+version: ''
 model_id: Fujian30_96_12_DiffusionTS
 model: DiffusionTS
 
@@ -83,6 +84,7 @@ des: DiffusionTS
 loss: MSE
 lradj: type1
 use_amp: false
+log_interval: 100
 
 # device
 use_gpu: true

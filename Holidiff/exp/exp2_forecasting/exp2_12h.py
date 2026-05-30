@@ -174,10 +174,18 @@ class Exp2Forecast12H(Exp_Basic):
     # ---------------------------------------------------------------------
     # diffusion / sampling helpers
     # ---------------------------------------------------------------------
-    def _run_model(self, model, batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=None, holiday_flag=None):
+    def _run_model(self, model, batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=None, holiday_flag=None, future_target=None):
         if self.args.is_diff:
             try:
-                return model(batch_x, batch_x_mark, dec_inp, batch_y_mark, sample_times=sample_times, holiday_flag=holiday_flag)
+                return model(
+                    batch_x,
+                    batch_x_mark,
+                    dec_inp,
+                    batch_y_mark,
+                    sample_times=sample_times,
+                    holiday_flag=holiday_flag,
+                    future_target=future_target,
+                )
             except TypeError:
                 return model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
         try:
@@ -284,17 +292,22 @@ class Exp2Forecast12H(Exp_Basic):
         return str(value)
 
     def _compute_extra_metrics(self, preds, trues, histories, holidays, masks, dataset):
-        if self._is_pems_dataset() or holidays is None:
-            return {}
+        is_pems = self._is_pems_dataset()
+        if holidays is None:
+            if is_pems:
+                holidays = np.zeros(preds.shape[:2], dtype=np.float32)
+            else:
+                return {}
+
         holiday_sum = np.nansum(holidays)
-        if holiday_sum <= 0:
+        if holiday_sum <= 0 and not is_pems:
             return {}
 
         adj = getattr(dataset, 'adj', None)
         if isinstance(adj, torch.Tensor):
             adj = adj.detach().cpu().numpy()
 
-        return evaluate_all(
+        extra_metrics = evaluate_all(
             y_pred=preds,
             y_true=trues,
             hist=histories,
@@ -306,6 +319,16 @@ class Exp2Forecast12H(Exp_Basic):
             valid_mask=masks,
             bandwidth_scale=getattr(self.args, 'eval_bandwidth_scale', 0.5),
         )
+
+        if is_pems:
+            holiday_only_prefixes = ('Hol-', 'Reg-', 'HDR', 'CG-HDR', 'holiday_')
+            holiday_only_keys = {'CG-F1', 'CG-CSI', 'TP', 'FP', 'FN'}
+            extra_metrics = {
+                k: v for k, v in extra_metrics.items()
+                if not k.startswith(holiday_only_prefixes) and k not in holiday_only_keys
+            }
+
+        return extra_metrics
 
     def _print_and_write_metrics(self, handle, basic_metrics, extra_metrics):
         basic_text = 'mae: {mae}, mse: {mse}, rmse: {rmse}'.format(**basic_metrics)
@@ -372,6 +395,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_y_mark,
                     sample_times=self.args.sample_times,
                     holiday_flag=batch_holiday,
+                    future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
                 outputs = model_output[0] if self.args.is_diff else model_output
 
@@ -487,6 +511,7 @@ class Exp2Forecast12H(Exp_Basic):
                         batch_y_mark,
                         sample_times=self.args.sample_times,
                         holiday_flag=batch_holiday,
+                        future_target=batch_y[:, -self.args.pred_len:, :],
                     )
                     outputs = model_output[0] if self.args.is_diff else model_output
 
@@ -663,6 +688,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_y_mark,
                     sample_times=self.args.vs_times,
                     holiday_flag=batch_holiday,
+                    future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
                 outputs = model_output[0] if self.args.is_diff else model_output
 

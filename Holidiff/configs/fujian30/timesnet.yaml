@@ -1,15 +1,15 @@
 task_name: long_term_forecast
 is_training: 1
 version: ''
-model_id: Fujian30_96_12_PatchTST_1epoch
-model: PatchTST
+model_id: Fujian30_96_12_TimesNet
+model: TimesNet
 
 data: fujian30
 root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
 data_path: fujian30_clean.csv
 features: M
 target: traffic_flow
-freq: 15min
+freq: t
 checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
 
 seq_len: 96
@@ -30,7 +30,7 @@ d_model: 128
 n_heads: 8
 e_layers: 1
 d_layers: 1
-d_ff: 512
+d_ff: 256
 moving_avg: 25
 factor: 1
 distil: true
@@ -46,7 +46,7 @@ down_sampling_layers: 0
 down_sampling_window: 1
 down_sampling_method: null
 seg_len: 48
-stride: 12
+stride: 1
 patch_len: 12
 data_stride: 1
 
@@ -60,7 +60,7 @@ train_epochs: 1
 batch_size: 32
 patience: 3
 learning_rate: 0.0001
-des: PatchTST
+des: TimesNet
 loss: MSE
 loss_type: MSE
 lradj: type1
