@@ -393,10 +393,12 @@ class TrafficWarehouseCsvDataset(Dataset):
         self.T_total = raw_data.shape[0]
         self.stations = pivot.columns.to_numpy()
 
-        train_end = int(self.T_total * 0.7)
+        self.train_end = int(self.T_total * 0.7)
+        self.val_end = int(self.T_total * 0.8)
+
         self.scaler = _StandardScaler()
         if self.scale:
-            self.scaler.fit(raw_data[:train_end])
+            self.scaler.fit(raw_data[:self.train_end])
             self.raw_data = self.scaler.transform(raw_data).astype(np.float32)
         else:
             self.raw_data = raw_data
@@ -412,27 +414,25 @@ class TrafficWarehouseCsvDataset(Dataset):
     def _build_indices(self):
         window_size = self.input_len + self.pred_len
         all_starts = list(range(0, self.T_total - window_size + 1, self.stride))
-        train_end = int(self.T_total * 0.7)
-        val_end = int(self.T_total * 0.8)
         valid = []
         for s in all_starts:
             e = s + window_size
             p = s + self.input_len + self.pred_len
             if self.mode == 'standard':
-                if self.split == 'train' and e <= train_end:
+                if self.split == 'train' and e <= self.train_end:
                     valid.append(s)
-                elif self.split == 'val' and train_end <= s and e <= val_end:
+                elif self.split == 'val' and self.train_end <= s and e <= self.val_end:
                     valid.append(s)
-                elif self.split == 'test' and val_end <= s:
+                elif self.split == 'test' and self.val_end <= s:
                     valid.append(s)
             elif self.mode == 'holiday_probe':
                 whole_window_holiday = self.holiday_flag[s:e].sum() > 0
                 future_holiday = self.holiday_flag[s + self.input_len:p].sum() > 0
-                if self.split == 'train' and e <= train_end and not whole_window_holiday:
+                if self.split == 'train' and e <= self.train_end and not whole_window_holiday:
                     valid.append(s)
-                elif self.split == 'val' and train_end <= s and e <= val_end and future_holiday:
+                elif self.split == 'val' and self.train_end <= s and e <= self.val_end and future_holiday:
                     valid.append(s)
-                elif self.split == 'test' and val_end <= s and future_holiday:
+                elif self.split == 'test' and self.val_end <= s and future_holiday:
                     valid.append(s)
             else:
                 raise ValueError(f'Unknown mode: {self.mode}')

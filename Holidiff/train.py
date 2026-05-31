@@ -128,6 +128,9 @@ CLI_OVERRIDE_KEYS = {
     'eval_delta_t',
     'eval_peak_radius',
     'eval_bandwidth_scale',
+    'train_val_aggregation_mode',
+    'test_aggregation_mode',
+    'test_times',
 }
 
 
@@ -191,6 +194,9 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default=base_args.config)
     parser.add_argument('--version', type=str, default=cfg.get('version', base_args.version))
     parser.add_argument('--load_checkpoint', type=str, default=cfg.get('load_checkpoint', base_args.load_checkpoint))
+    parser.add_argument('--train_val_aggregation_mode', type=str, default=cfg.get('train_val_aggregation_mode', cfg.get('aggregation_mode', '')))
+    parser.add_argument('--test_aggregation_mode', type=str, default=cfg.get('test_aggregation_mode', cfg.get('aggregation_mode', '')))
+    parser.add_argument('--test_times', type=int, default=cfg.get('test_times', cfg.get('vs_times', cfg.get('sample_times', 1))))
     parser.add_argument('--eval_gamma', type=float, default=cfg.get('eval_gamma', 0.5))
     parser.add_argument('--eval_delta_t', type=float, default=cfg.get('eval_delta_t', 1.0))
     parser.add_argument('--eval_peak_radius', type=int, default=cfg.get('eval_peak_radius', 1))

@@ -1,16 +1,22 @@
 task_name: long_term_forecast
 is_training: 1
 version: ''
-model_id: Fujian30_96_12_PatchTST
-model: PatchTST
+model_id: Fujian30_96_12_SimDiff
+model: SimDiff
 
 data: fujian30
-root_path: /root/yanyijin/STdiff/Holidiff/data/fujian-30
+root_path: /root/autodl-tmp/STdiff_data/fujian-30
 data_path: fujian30_clean.csv
 features: M
 target: traffic_flow
 freq: 15min
-checkpoints: /root/yanyijin/STdiff/Holidiff/checkpoints/
+checkpoints: /root/autodl-tmp/STdiff_runs/checkpoints/fujian30
+
+time_col: time_slot
+node_col: station_index
+target_col: traffic_flow
+holiday_col: is_holiday
+adj_path: /root/autodl-tmp/STdiff_data/fujian-30/adjacent_gantry.csv
 
 seq_len: 96
 label_len: 48
@@ -18,6 +24,7 @@ pred_len: 12
 seasonal_patterns: Monthly
 inverse: false
 
+# SimDiff original model defaults from baseline/SimDiff/run.py, except dataset dimensions.
 expand: 2
 d_conv: 4
 top_k: 5
@@ -35,10 +42,9 @@ moving_avg: 25
 factor: 1
 distil: true
 dropout: 0.0
-skip_dropout: 0.0
+skip_dropout: 0.4
 embed: timeF
 activation: gelu
-output_attention: false
 channel_independence: 1
 decomp_method: moving_avg
 use_norm: 1
@@ -46,23 +52,37 @@ down_sampling_layers: 0
 down_sampling_window: 1
 down_sampling_method: null
 seg_len: 48
-stride: 12
+stride: 6
 patch_len: 12
 data_stride: 1
 
-is_diff: 0
-sample_times: 1
-vs_times: 1
+# SimDiff baseline diffusion/sampling defaults for Fujian30 H=12.
+coss: 5
+rmom: 20
+n_b: 5
+sample_times: 20
+vs_times: 20
+is_diff: 1
+s_steps: 5
+skip_type: time_quadratic
+method: multistep
+lower_order_final: true
+order: 2
+diff_steps: 100
+use_mom: 1
+new_norm: 1
+use_shuffle: 1
+use_first: 0
 
 num_workers: 0
 itr: 1
 train_epochs: 100
 batch_size: 32
 patience: 20
-learning_rate: 0.0001
-des: PatchTST
+learning_rate: 0.001
+des: SimDiff
 loss: MSE
-loss_type: MSE
+loss_type: MAE
 lradj: type1
 use_amp: false
 log_interval: 100
@@ -95,3 +115,8 @@ discdtw: false
 discsdtw: false
 extra_tag: ''
 mode: standard
+eval_gamma: 0.5
+eval_delta_t: 1.0
+eval_peak_radius: 1
+eval_bandwidth_scale: 0.5
+zero_as_missing: true

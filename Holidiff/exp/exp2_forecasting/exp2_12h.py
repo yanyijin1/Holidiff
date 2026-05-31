@@ -341,12 +341,32 @@ class Exp2Forecast12H(Exp_Basic):
             handle.write(text)
             handle.write('\n')
 
+    def _set_model_aggregation_mode(self, mode):
+        if mode is None:
+            return None
+        core_model = self._core_model()
+        if not hasattr(core_model, 'aggregation_mode'):
+            return None
+        previous = core_model.aggregation_mode
+        core_model.aggregation_mode = str(mode).lower()
+        return previous
+
+    def _restore_model_aggregation_mode(self, previous):
+        if previous is None:
+            return
+        core_model = self._core_model()
+        if hasattr(core_model, 'aggregation_mode'):
+            core_model.aggregation_mode = previous
+
 
     # ---------------------------------------------------------------------
     # validation / training
     # ---------------------------------------------------------------------
     def vali(self, model, vali_loader, criterion):
         total_loss = []
+        previous_aggregation_mode = self._set_model_aggregation_mode(
+            getattr(self.args, 'train_val_aggregation_mode', getattr(self.args, 'aggregation_mode', None))
+        )
         model.eval()
         with torch.no_grad():
             for i, batch in enumerate(vali_loader):
@@ -393,7 +413,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_x_mark,
                     dec_inp,
                     batch_y_mark,
-                    sample_times=self.args.sample_times,
+                    sample_times=getattr(self.args, 'vs_times', self.args.sample_times),
                     holiday_flag=batch_holiday,
                     future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
@@ -409,6 +429,7 @@ class Exp2Forecast12H(Exp_Basic):
                 total_loss.append(loss.item())
 
         model.train()
+        self._restore_model_aggregation_mode(previous_aggregation_mode)
         return np.average(total_loss)
 
     def train(self, setting):
@@ -652,6 +673,9 @@ class Exp2Forecast12H(Exp_Basic):
             core_model._mom_kwargs['scaler_mean'] = torch.tensor(test_data.scaler.mean, dtype=torch.float32).squeeze(0)
             core_model._mom_kwargs['scaler_std'] = torch.tensor(test_data.scaler.std, dtype=torch.float32).squeeze(0)
         self.model.eval()
+        previous_aggregation_mode = self._set_model_aggregation_mode(
+            getattr(self.args, 'test_aggregation_mode', getattr(self.args, 'aggregation_mode', None))
+        )
 
         preds = []
         trues = []
@@ -686,7 +710,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_x_mark,
                     dec_inp,
                     batch_y_mark,
-                    sample_times=self.args.vs_times,
+                    sample_times=getattr(self.args, 'test_times', self.args.vs_times),
                     holiday_flag=batch_holiday,
                     future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
@@ -740,10 +764,8 @@ class Exp2Forecast12H(Exp_Basic):
         with open(metrics_path, 'w', encoding='utf-8') as f:
             json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
 
+        self._restore_model_aggregation_mode(previous_aggregation_mode)
         return mae, mse, rmse
-
-
-Exp_Long_Term_Forecast = Exp2Forecast12H
 
 
 Exp_Long_Term_Forecast = Exp2Forecast12H

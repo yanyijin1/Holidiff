@@ -5,6 +5,31 @@ from torch.nn.utils import weight_norm
 import math
 
 
+def normalize_time_freq(freq):
+    if freq is None:
+        return 'h'
+    freq_str = str(freq).strip().lower()
+    alias_map = {
+        'h': 'h', '1h': 'h', 'hour': 'h', 'hours': 'h',
+        't': 't', 'min': 't', 'mins': 't', 'minute': 't', 'minutes': 't',
+        's': 's', 'sec': 's', 'secs': 's', 'second': 's', 'seconds': 's',
+        'd': 'd', 'day': 'd', 'days': 'd',
+        'w': 'w', 'week': 'w', 'weeks': 'w',
+        'm': 'm', 'month': 'm', 'months': 'm',
+        'b': 'b', 'business': 'b', 'businessday': 'b', 'businessdays': 'b',
+        'a': 'a', 'y': 'a', 'year': 'a', 'years': 'a', 'annual': 'a'
+    }
+    if freq_str in alias_map:
+        return alias_map[freq_str]
+    if freq_str.endswith('min') or freq_str.endswith('mins') or freq_str.endswith('minute') or freq_str.endswith('minutes'):
+        return 't'
+    if freq_str.endswith('s') or freq_str.endswith('sec') or freq_str.endswith('secs') or freq_str.endswith('second') or freq_str.endswith('seconds'):
+        return 's'
+    if freq_str.endswith('h') or freq_str.endswith('hour') or freq_str.endswith('hours'):
+        return 'h'
+    return freq_str
+
+
 class PositionalEmbedding(nn.Module):
     def __init__(self, d_model, max_len=5000):
         super(PositionalEmbedding, self).__init__()
@@ -73,8 +98,9 @@ class TemporalEmbedding(nn.Module):
         day_size = 32
         month_size = 13
 
+        normalized_freq = normalize_time_freq(freq)
         Embed = FixedEmbedding if embed_type == 'fixed' else nn.Embedding
-        if freq == 't':
+        if normalized_freq == 't':
             self.minute_embed = Embed(minute_size, d_model)
         self.hour_embed = Embed(hour_size, d_model)
         self.weekday_embed = Embed(weekday_size, d_model)
@@ -99,7 +125,8 @@ class TimeFeatureEmbedding(nn.Module):
 
         freq_map = {'h': 4, 't': 5, 's': 6,
                     'm': 1, 'a': 1, 'w': 2, 'd': 3, 'b': 3}
-        d_inp = freq_map[freq]
+        normalized_freq = normalize_time_freq(freq)
+        d_inp = freq_map[normalized_freq]
         self.embed = nn.Linear(d_inp, d_model, bias=False)
 
     def forward(self, x):
