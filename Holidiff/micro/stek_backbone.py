@@ -18,25 +18,7 @@ class TensorTranspose(nn.Module):
         return x.transpose(*self.dims)
 
 
-class TrendAwarePatchEmbedding(nn.Module):
-    def __init__(self, configs):
-        super().__init__()
-        self.patch_len = configs.patch_len
-        self.d_model = configs.d_model
-        self.concat_projection = nn.Linear(self.patch_len + 1, self.d_model)
-
-    def _compute_patch_slope(self, patch_tokens):
-        denom = max(self.patch_len - 1, 1)
-        slope = (patch_tokens[..., -1] - patch_tokens[..., 0]) / denom
-        return slope.unsqueeze(-1)
-
-    def forward(self, patch_tokens):
-        patch_slope = self._compute_patch_slope(patch_tokens)
-        patch_features = torch.cat([patch_tokens, patch_slope], dim=-1)
-        return self.concat_projection(patch_features)
-
-
-class SimDiffPatchEmbedding(nn.Module):
+class LocalPatchEmbedding(nn.Module):
     def __init__(self, configs):
         super().__init__()
         self.input_projection = nn.Linear(configs.patch_len, configs.d_model)
@@ -103,9 +85,8 @@ class STEKBackbone(nn.Module):
         self.patch_num = patch_num
         self.patch_num_forecast = patch_num_forecast
         configs.d_ff = configs.d_model * 2
-        self.use_trend_aware = bool(getattr(configs, 'use_trend_aware', True))
         self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
-        self.patch_embedding = TrendAwarePatchEmbedding(configs) if self.use_trend_aware else SimDiffPatchEmbedding(configs)
+        self.patch_embedding = LocalPatchEmbedding(configs)
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
         self.W_outs = nn.Linear((patch_num + 1 + patch_num_forecast) * configs.d_model, configs.pred_len)

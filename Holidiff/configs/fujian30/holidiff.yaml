@@ -53,7 +53,6 @@ down_sampling_method: null
 seg_len: 48
 stride: 1
 patch_len: 12
-patch_embed_mode: trend_aware_concat
 coss: 5.0
 rmom: 5
 n_b: 5

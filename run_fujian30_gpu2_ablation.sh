@@ -13,13 +13,12 @@ run_one() {
   local tag="$2"
   local log_path="$LOG_DIR/${tag}.log"
   echo "[START] $tag"
-  PYTHONPATH="$ROOT" CUDA_VISIBLE_DEVICES=2 "$PYTHON_BIN" -u "$TRAIN_PY" --config "$cfg" --version "$tag" \
+  PYTHONPATH="$ROOT" CUDA_VISIBLE_DEVICES=0 "$PYTHON_BIN" -u "$TRAIN_PY" --config "$cfg" --version "$tag" \
     | tee "$log_path"
   echo "[DONE] $tag"
 }
 
 run_one "$CFG_DIR/wo_lstde_h12.yaml" "ablation_wo_lstde__h12"
-run_one "$CFG_DIR/wo_trend_aware_h12.yaml" "ablation_wo_trend_aware__h12"
 run_one "$CFG_DIR/wo_sfcn_h12.yaml" "ablation_wo_sfcn__h12"
 run_one "$CFG_DIR/wo_dca_single_h12.yaml" "ablation_wo_dca_single__h12"
 run_one "$CFG_DIR/wo_dca_mean_h12.yaml" "ablation_wo_dca_mean__h12"

@@ -44,7 +44,6 @@ class HATEK(nn.Module):
         self.n_blocks = configs.n_b
         self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
         self.use_holidiff_lstde = bool(getattr(configs, 'use_holidiff_lstde', True))
-        self.use_trend_aware = bool(getattr(configs, 'use_trend_aware', True))
         self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
         self.macro_aggregator = build_macro_aggregator(configs)
         self.tek = TEK(configs)

@@ -20,15 +20,15 @@ run_one() {
   echo "[DONE] $tag"
 }
 
-run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h12.yaml" "holidiff_main_gpu1__h12" \
+run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h12.yaml" "final_holidiff__h12" \
   --train_val_aggregation_mode single \
   --test_aggregation_mode dca
-run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h24.yaml" "holidiff_main_gpu1__h24" \
+run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h24.yaml" "final_holidiff__h24" \
   --train_val_aggregation_mode single \
   --test_aggregation_mode dca
-run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h36.yaml" "holidiff_main_gpu1__h36" \
+run_one "holidiff" "$ROOT/Holidiff/configs/fujian30/holidiff_h36.yaml" "final_holidiff__h36" \
   --train_val_aggregation_mode single \
   --test_aggregation_mode dca
-run_one "dlinear" "$ROOT/Holidiff/configs/fujian30/dlinear_h36.yaml" "dlinear_main_gpu1__h36"
+run_one "dlinear" "$ROOT/Holidiff/configs/fujian30/dlinear_h36.yaml" "final_dlinear__h36"
 
 echo "All Fujian30 GPU1 main runs completed."

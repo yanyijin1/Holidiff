@@ -53,7 +53,6 @@ down_sampling_method: null
 seg_len: 48
 stride: 1
 patch_len: 12
-patch_embed_mode: trend_aware_concat
 
 # Keep host validation/test in diffusion-output mode.
 is_diff: 1
