@@ -7,6 +7,7 @@ import torch.nn as nn
 from Holidiff.micro.tek import TEK
 from Holidiff.macro.dpm_sampler import DPMSolverSampler
 from Holidiff.macro.agg import build_macro_aggregator
+from Holidiff.models.simdiff.revin import RevIN
 from Holidiff.utils.diffusion_utils import *
 
 
@@ -42,8 +43,12 @@ class HATEK(nn.Module):
         self.rmom_n = configs.rmom
         self.n_blocks = configs.n_b
         self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
+        self.use_holidiff_lstde = bool(getattr(configs, 'use_holidiff_lstde', True))
+        self.use_trend_aware = bool(getattr(configs, 'use_trend_aware', True))
+        self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
         self.macro_aggregator = build_macro_aggregator(configs)
         self.tek = TEK(configs)
+        self.revin_layer = RevIN(configs.enc_in, affine=True, subtract_last=False)
             
         self.enc_in = configs.enc_in
         self.batch_size =configs.batch_size
@@ -79,11 +84,24 @@ class HATEK(nn.Module):
             x = F.pad(x, (0, pad_len), mode='replicate')
         f_dim = -1 if self.configs.features in ['MS'] else 0
         x = x[:, f_dim:, :]
-        cond_ts = x_enc.permute(0, 2, 1)
-        mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
-        std_ = torch.std(cond_ts, dim=-1, keepdims=True)
-        cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
-        x = (x - mean_) / (std_ + 0.00001)
+        if self.use_holidiff_lstde:
+            cond_ts = x_enc.permute(0, 2, 1)
+            mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
+            std_ = torch.std(cond_ts, dim=-1, keepdims=True)
+            cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
+            x = (x - mean_) / (std_ + 0.00001)
+            denorm_mean = mean_
+            denorm_std = std_
+            use_revin_denorm = False
+        else:
+            cond_ts = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
+            node_count = x.shape[1]
+            mean_ = torch.mean(x[:, -node_count:, :], dim=1).unsqueeze(1)
+            std_ = torch.ones_like(torch.std(x, dim=1).unsqueeze(1))
+            x = (x - mean_.repeat(1, node_count, 1)) / (std_.repeat(1, node_count, 1) + 0.00001)
+            denorm_mean = None
+            denorm_std = None
+            use_revin_denorm = True
         B = np.shape(x)[0]
         N = self.configs.enc_in
         L1 = np.shape(cond_ts)[2]
@@ -97,7 +115,10 @@ class HATEK(nn.Module):
         x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
         model_out = self.nn(x_k, t, cond_ts, x_mark_enc)
         model_out = torch.reshape(model_out, (B, N, target_len))
-        model_out = model_out * (std_ + 0.00001) + mean_
+        if use_revin_denorm:
+            model_out = self.revin_layer(model_out.permute(0, 2, 1), 'denorm').permute(0, 2, 1)
+        else:
+            model_out = model_out * (denorm_std + 0.00001) + denorm_mean
         weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, N, 1)
         model_out = model_out.permute(0, 2, 1)
         return model_out, weight_tmp
@@ -115,11 +136,19 @@ class HATEK(nn.Module):
         all_outs = []
         B = np.shape(x_past)[0]
         N = self.configs.enc_in
-        mean_ = torch.mean(x_past, dim=-1, keepdims=True)
-        std_ = torch.std(x_past, dim=-1, keepdims=True)
-        mean_ = mean_.to(self.betas.device)
-        std_ = std_.to(self.betas.device)
-        x_past = (x_past - mean_) / (std_ + 0.00001)
+        if self.use_holidiff_lstde:
+            mean_ = torch.mean(x_past, dim=-1, keepdims=True)
+            std_ = torch.std(x_past, dim=-1, keepdims=True)
+            mean_ = mean_.to(self.betas.device)
+            std_ = std_.to(self.betas.device)
+            x_past = (x_past - mean_) / (std_ + 0.00001)
+            use_revin_denorm = False
+        else:
+            x_past = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
+            x_past = x_past.to(self.betas.device)
+            mean_ = None
+            std_ = None
+            use_revin_denorm = True
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         for i in range(sample_times):
             start_code = torch.randn((batchs, nL), device=self.betas.device)
@@ -137,8 +166,11 @@ class HATEK(nn.Module):
             )
             diff_samples = diff_samples.to(self.betas.device)
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
-            diff_samples = diff_samples * (std_ + 0.00001) + mean_
-            diff_samples = diff_samples.permute(0, 2, 1)
+            if use_revin_denorm:
+                diff_samples = self.revin_layer(diff_samples.permute(0, 2, 1), 'denorm')
+            else:
+                diff_samples = diff_samples * (std_ + 0.00001) + mean_
+                diff_samples = diff_samples.permute(0, 2, 1)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
         outs = self._aggregate_samples(all_outs, history_context=history_for_trend)

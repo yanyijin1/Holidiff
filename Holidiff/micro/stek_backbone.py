@@ -36,6 +36,15 @@ class TrendAwarePatchEmbedding(nn.Module):
         return self.concat_projection(patch_features)
 
 
+class SimDiffPatchEmbedding(nn.Module):
+    def __init__(self, configs):
+        super().__init__()
+        self.input_projection = nn.Linear(configs.patch_len, configs.d_model)
+
+    def forward(self, patch_tokens):
+        return self.input_projection(patch_tokens)
+
+
 class TCPAttention(nn.Module):
     def __init__(self, config, over_hidden=False, trianable_smooth=False, untoken=False, *configs, **kwargs):
         super().__init__()
@@ -94,7 +103,9 @@ class STEKBackbone(nn.Module):
         self.patch_num = patch_num
         self.patch_num_forecast = patch_num_forecast
         configs.d_ff = configs.d_model * 2
-        self.patch_embedding = TrendAwarePatchEmbedding(configs)
+        self.use_trend_aware = bool(getattr(configs, 'use_trend_aware', True))
+        self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
+        self.patch_embedding = TrendAwarePatchEmbedding(configs) if self.use_trend_aware else SimDiffPatchEmbedding(configs)
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
         self.W_outs = nn.Linear((patch_num + 1 + patch_num_forecast) * configs.d_model, configs.pred_len)
@@ -120,7 +131,7 @@ class STEKBackbone(nn.Module):
         future_tokens = micro_realization.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
         state_embeddings = self.input_dropout(self.patch_embedding(state_tokens))
-        if frequency_patch_embedding is not None:
+        if self.use_sfcn and frequency_patch_embedding is not None:
             if frequency_patch_embedding.size(-2) != state_embeddings.size(-2):
                 min_tokens = min(frequency_patch_embedding.size(-2), state_embeddings.size(-2))
                 frequency_patch_embedding = frequency_patch_embedding[:, :, :min_tokens, :]
