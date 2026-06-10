@@ -1,4 +1,4 @@
-    
+
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -9,6 +9,7 @@ from Holidiff.macro.dpm_sampler import DPMSolverSampler
 from Holidiff.macro.agg import build_macro_aggregator
 from Holidiff.models.simdiff.revin import RevIN
 from Holidiff.utils.diffusion_utils import *
+from Holidiff.frequency.build import build_frequency_patch_embed
 
 
 
@@ -26,7 +27,7 @@ def cosine_beta_schedule(timesteps, s=5):
 
 
 class HATEK(nn.Module):
-    
+
     def __init__(self, configs):
         super(HATEK, self).__init__()
 
@@ -45,10 +46,11 @@ class HATEK(nn.Module):
         self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
         self.use_holidiff_lstde = bool(getattr(configs, 'use_holidiff_lstde', True))
         self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
+        self.frequency_patch_embed = build_frequency_patch_embed(configs) if self.use_sfcn else None
         self.macro_aggregator = build_macro_aggregator(configs)
         self.tek = TEK(configs)
         self.revin_layer = RevIN(configs.enc_in, affine=True, subtract_last=False)
-            
+
         self.enc_in = configs.enc_in
         self.batch_size =configs.batch_size
         self.beta_start = 1e-4 # 1e4
@@ -65,17 +67,20 @@ class HATEK(nn.Module):
 
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None, future_target=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None, future_target=None,
+                mask_band=None, preset_noises=None):
         if self.training:
             return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                             enc_self_mask, dec_self_mask, dec_enc_mask)
+                                             enc_self_mask, dec_self_mask, dec_enc_mask, holiday_flag=holiday_flag, future_target=future_target,
+                                             mask_band=mask_band)
         else:
             return self.forward_consensus_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                            enc_self_mask, dec_self_mask, dec_enc_mask, sample_times)
+                                            enc_self_mask, dec_self_mask, dec_enc_mask, sample_times, holiday_flag=holiday_flag,
+                                            mask_band=mask_band, preset_noises=preset_noises)
 
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None, future_target=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None, future_target=None, mask_band=None):
 
         x = x_dec[:, -self.configs.pred_len:, :].permute(0, 2, 1)
         if x.shape[-1] < self.patch_len:
@@ -85,6 +90,7 @@ class HATEK(nn.Module):
         x = x[:, f_dim:, :]
         if self.use_holidiff_lstde:
             cond_ts = x_enc.permute(0, 2, 1)
+            raw_history = cond_ts
             mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
             std_ = torch.std(cond_ts, dim=-1, keepdims=True)
             cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
@@ -94,6 +100,7 @@ class HATEK(nn.Module):
             use_revin_denorm = False
         else:
             cond_ts = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
+            raw_history = x_enc.permute(0, 2, 1)
             node_count = x.shape[1]
             mean_ = torch.mean(x[:, -node_count:, :], dim=1).unsqueeze(1)
             std_ = torch.ones_like(torch.std(x, dim=1).unsqueeze(1))
@@ -108,11 +115,14 @@ class HATEK(nn.Module):
         target_len = self.configs.pred_len
         cond_ts = torch.reshape(cond_ts, (B * N, L1))
         x = torch.reshape(x, (B * N, L2))
+        frequency_patch_embedding = None
+        if self.frequency_patch_embed is not None:
+            frequency_patch_embedding = self.frequency_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
         t = torch.randint(0, self.num_timesteps, size=[B * N // 2,]).long().to(self.device)
         t = torch.cat([t, self.num_timesteps - 1 - t], dim=0)
         noise = torch.randn_like(x)
         x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
-        model_out = self.nn(x_k, t, cond_ts, x_mark_enc)
+        model_out = self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=raw_history, frequency_patch_embedding=frequency_patch_embedding, mask_band=mask_band)
         model_out = torch.reshape(model_out, (B, N, target_len))
         if use_revin_denorm:
             model_out = self.revin_layer(model_out.permute(0, 2, 1), 'denorm').permute(0, 2, 1)
@@ -123,7 +133,7 @@ class HATEK(nn.Module):
         return model_out, weight_tmp
 
     def forward_consensus_inference(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
-                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None):
+                enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None, mask_band=None, preset_noises=None):
 
         history_for_trend = x_enc
         x_past = x_enc.permute(0, 2, 1)
@@ -138,19 +148,27 @@ class HATEK(nn.Module):
         if self.use_holidiff_lstde:
             mean_ = torch.mean(x_past, dim=-1, keepdims=True)
             std_ = torch.std(x_past, dim=-1, keepdims=True)
+            raw_history = x_past.clone()
             mean_ = mean_.to(self.betas.device)
             std_ = std_.to(self.betas.device)
             x_past = (x_past - mean_) / (std_ + 0.00001)
             use_revin_denorm = False
         else:
             x_past = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
+            raw_history = x_enc.permute(0, 2, 1).to(self.betas.device)
             x_past = x_past.to(self.betas.device)
             mean_ = None
             std_ = None
             use_revin_denorm = True
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
+        frequency_patch_embedding = None
+        if self.frequency_patch_embed is not None:
+            frequency_patch_embedding = self.frequency_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
         for i in range(sample_times):
-            start_code = torch.randn((batchs, nL), device=self.betas.device)
+            if preset_noises is not None:
+                start_code = preset_noises[i].to(self.betas.device)
+            else:
+                start_code = torch.randn((batchs, nL), device=self.betas.device)
             diff_samples, _ = self.sampler.sample(
                 S=self.configs.s_steps,
                 conditioning=x_past,
@@ -162,6 +180,9 @@ class HATEK(nn.Module):
                 unconditional_conditioning=None,
                 eta=0.,
                 x_T=start_code,
+                raw_history=raw_history,
+                frequency_patch_embedding=frequency_patch_embedding,
+                mask_band=mask_band,
             )
             diff_samples = diff_samples.to(self.betas.device)
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
@@ -177,7 +198,7 @@ class HATEK(nn.Module):
         return outs,all_outs.permute(1,0,2,3)
 
     def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
-    ):  
+    ):
 
         betas = cosine_beta_schedule(diff_steps,self.configs.coss)
 
@@ -216,14 +237,14 @@ class HATEK(nn.Module):
 
         lvlb_weights[0] = lvlb_weights[1]
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
-        assert not torch.isnan(self.lvlb_weights).all() 
+        assert not torch.isnan(self.lvlb_weights).all()
 
     def generate_micro_realization(self, x_start, t, noise=None):
 
         noise = default(noise, lambda: self.scaling_noise * torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
-    
+
     def _consensus_mean(self, seq):
         return torch.sum(seq, dim=0) / seq.size(0)
 
@@ -271,4 +292,3 @@ class HATEK(nn.Module):
         results = torch.stack(results)
 
         return torch.median(results, dim=0)[0]
-

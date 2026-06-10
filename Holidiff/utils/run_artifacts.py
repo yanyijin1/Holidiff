@@ -6,7 +6,7 @@ from Holidiff.utils.display_name import get_display_name
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LOG_DIR = PROJECT_ROOT / 'logs'
+LOG_DIR = Path('/root/autodl-tmp/STdiff_runs/logs')
 RESULT_DIR = PROJECT_ROOT / 'results'
 TEST_RESULT_DIR = PROJECT_ROOT / 'test_results'
 

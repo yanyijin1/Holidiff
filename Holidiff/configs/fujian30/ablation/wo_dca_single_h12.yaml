@@ -93,7 +93,7 @@ holiday_enable: false
 
 num_workers: 0
 itr: 1
-train_epochs: 100
+train_epochs: 30
 batch_size: 32
 patience: 20
 learning_rate: 0.001

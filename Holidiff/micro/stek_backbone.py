@@ -79,6 +79,7 @@ class STEKBackbone(nn.Module):
         self.stride = configs.stride
         self.d_model = configs.d_model
         self.n_blocks = configs.n_b
+        self.frequency_num_bands = int(getattr(configs, 'frequency_patch_embed_num_bands', getattr(configs, 'frequency_num_bands', 4)))
         self.frequency_conditioner_dim = int(getattr(configs, 'frequency_conditioner_dim', 8))
         patch_num = int((configs.seq_len - self.patch_len) / self.stride + 1)
         patch_num_forecast = max(1, int((configs.pred_len - self.patch_len) / self.stride + 1))
@@ -102,7 +103,7 @@ class STEKBackbone(nn.Module):
             for _ in range(configs.e_layers)
         ])
 
-    def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None, raw_history=None, physical_injection=None, frequency_patch_embedding=None):
+    def forward(self, micro_realization, timesteps, hist_macro_state, x_mark_enc=None, raw_history=None, physical_injection=None, frequency_patch_embedding=None, mask_band=None):
         b, c, _ = micro_realization.shape
         if hist_macro_state.shape[-1] < self.patch_len:
             hist_macro_state = torch.nn.functional.pad(hist_macro_state, (0, self.patch_len - hist_macro_state.shape[-1]), mode='replicate')
@@ -113,6 +114,13 @@ class STEKBackbone(nn.Module):
         state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
         state_embeddings = self.input_dropout(self.patch_embedding(state_tokens))
         if self.use_sfcn and frequency_patch_embedding is not None:
+            if mask_band is not None:
+                num_bands = max(1, int(getattr(self, 'frequency_num_bands', 4) if hasattr(self, 'frequency_num_bands') else 4))
+                band_width = max(1, frequency_patch_embedding.size(-1) // num_bands)
+                start = int(mask_band) * band_width
+                end = frequency_patch_embedding.size(-1) if int(mask_band) == num_bands - 1 else min(frequency_patch_embedding.size(-1), start + band_width)
+                frequency_patch_embedding = frequency_patch_embedding.clone()
+                frequency_patch_embedding[..., start:end] = 0.0
             if frequency_patch_embedding.size(-2) != state_embeddings.size(-2):
                 min_tokens = min(frequency_patch_embedding.size(-2), state_embeddings.size(-2))
                 frequency_patch_embedding = frequency_patch_embedding[:, :, :min_tokens, :]
