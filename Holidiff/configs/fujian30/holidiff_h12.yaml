@@ -69,6 +69,8 @@ lower_order_final: true
 order: 2
 diff_steps: 100
 aggregation_mode: simple
+train_val_aggregation_mode: simple
+test_aggregation_mode: dca
 dca_bandwidth_kde: 15.0
 dca_bandwidth_hist: 20.0
 dca_mode: joint
@@ -99,7 +101,7 @@ spatial_field_stats_source: history
 
 num_workers: 0
 itr: 1
-train_epochs: 100
+train_epochs: 30
 batch_size: 32
 patience: 20
 learning_rate: 0.001
