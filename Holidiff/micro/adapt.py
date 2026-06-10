@@ -170,9 +170,11 @@ class SFCN(VanillaNIAdapter):
 
     def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool):
         node_mean, node_scale = self._compute_node_stats(x_history)
-        edge_mean, edge_var = self.compute_field_stats(x_history)
+        # normalize history into the same space as encode_training_future
+        x_norm = (x_history - node_mean) / (node_scale + self.eps)
+        edge_mean, edge_var = self.compute_field_stats(x_norm)
         alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
-        return x_history, {
+        return x_norm, {
             'node_mean': node_mean,
             'node_scale': node_scale,
             'edge_mean': edge_mean,
@@ -187,16 +189,16 @@ class SFCN(VanillaNIAdapter):
         alpha = stats.get('alpha')
         if node_mean is None or node_scale is None:
             return pred
-        node_pred = pred * (node_scale + self.eps) + node_mean
-        if edge_var is None:
-            return node_pred
-        z_i = pred.unsqueeze(2)
-        z_j = pred.unsqueeze(1)
-        z_diff = z_j - z_i
-        field_pred = (self.field_mask.unsqueeze(0).unsqueeze(-1) * edge_var.unsqueeze(-1) * z_diff).sum(dim=2)
-        if alpha is None:
-            alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
-        return node_pred + alpha * field_pred
+        if edge_var is not None:
+            # field correction in normalized space, then denormalize once
+            z_i = pred.unsqueeze(2)
+            z_j = pred.unsqueeze(1)
+            z_diff = z_j - z_i
+            field_res = (self.field_mask.unsqueeze(0).unsqueeze(-1) * edge_var.unsqueeze(-1) * z_diff).sum(dim=2)
+            if alpha is None:
+                alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
+            pred = pred + alpha * field_res
+        return pred * (node_scale + self.eps) + node_mean
 
 
 class IdentityLocalScaling(nn.Module):

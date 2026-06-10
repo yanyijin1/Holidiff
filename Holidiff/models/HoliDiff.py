@@ -10,6 +10,8 @@ from Holidiff.macro.agg import build_macro_aggregator
 from Holidiff.models.simdiff.revin import RevIN
 from Holidiff.utils.diffusion_utils import *
 from Holidiff.frequency.build import build_frequency_patch_embed
+from Holidiff.micro.adapt import build_target_adapter
+from Holidiff.micro.inject import PhysicalInjectionModule
 
 
 
@@ -48,6 +50,8 @@ class HATEK(nn.Module):
         self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
         self.frequency_patch_embed = build_frequency_patch_embed(configs) if self.use_sfcn else None
         self.macro_aggregator = build_macro_aggregator(configs)
+        self.target_adapter = build_target_adapter(configs)
+        self.physical_injection = PhysicalInjectionModule(configs)
         self.tek = TEK(configs)
         self.revin_layer = RevIN(configs.enc_in, affine=True, subtract_last=False)
 
@@ -90,13 +94,9 @@ class HATEK(nn.Module):
         x = x[:, f_dim:, :]
         if self.use_holidiff_lstde:
             cond_ts = x_enc.permute(0, 2, 1)
-            raw_history = cond_ts
-            mean_ = torch.mean(cond_ts, dim=-1, keepdims=True)
-            std_ = torch.std(cond_ts, dim=-1, keepdims=True)
-            cond_ts = (cond_ts - mean_) / (std_ + 0.00001)
-            x = (x - mean_) / (std_ + 0.00001)
-            denorm_mean = mean_
-            denorm_std = std_
+            raw_history = cond_ts.clone()
+            cond_ts, train_stats = self.target_adapter.encode_inference_history(cond_ts, use_local_scaling=False)
+            x, _ = self.target_adapter.encode_training_future(x, cond_ts, use_local_scaling=False)
             use_revin_denorm = False
         else:
             cond_ts = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
@@ -127,7 +127,9 @@ class HATEK(nn.Module):
         if use_revin_denorm:
             model_out = self.revin_layer(model_out.permute(0, 2, 1), 'denorm').permute(0, 2, 1)
         else:
-            model_out = model_out * (denorm_std + 0.00001) + denorm_mean
+            model_out = self.target_adapter.decode_prediction(model_out, train_stats, use_local_scaling=False)
+        model_out = model_out.permute(0, 2, 1)
+        model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
         weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, N, 1)
         model_out = model_out.permute(0, 2, 1)
         return model_out, weight_tmp
@@ -146,19 +148,15 @@ class HATEK(nn.Module):
         B = np.shape(x_past)[0]
         N = self.configs.enc_in
         if self.use_holidiff_lstde:
-            mean_ = torch.mean(x_past, dim=-1, keepdims=True)
-            std_ = torch.std(x_past, dim=-1, keepdims=True)
             raw_history = x_past.clone()
-            mean_ = mean_.to(self.betas.device)
-            std_ = std_.to(self.betas.device)
-            x_past = (x_past - mean_) / (std_ + 0.00001)
+            x_past, infer_stats = self.target_adapter.encode_inference_history(x_past, use_local_scaling=False)
+            x_past = x_past.to(self.betas.device)
             use_revin_denorm = False
         else:
             x_past = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
             raw_history = x_enc.permute(0, 2, 1).to(self.betas.device)
             x_past = x_past.to(self.betas.device)
-            mean_ = None
-            std_ = None
+            infer_stats = {}
             use_revin_denorm = True
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         frequency_patch_embedding = None
@@ -189,8 +187,9 @@ class HATEK(nn.Module):
             if use_revin_denorm:
                 diff_samples = self.revin_layer(diff_samples.permute(0, 2, 1), 'denorm')
             else:
-                diff_samples = diff_samples * (std_ + 0.00001) + mean_
+                diff_samples = self.target_adapter.decode_prediction(diff_samples, infer_stats, use_local_scaling=False)
                 diff_samples = diff_samples.permute(0, 2, 1)
+            diff_samples = self.physical_injection.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
         outs = self._aggregate_samples(all_outs, history_context=history_for_trend)
