@@ -358,6 +358,12 @@ class Exp2Forecast12H(Exp_Basic):
         if hasattr(core_model, 'aggregation_mode'):
             core_model.aggregation_mode = previous
 
+    def _effective_sample_times(self, requested_times, aggregation_mode):
+        mode = str(aggregation_mode or '').lower()
+        if mode == 'single':
+            return 1
+        return int(requested_times)
+
 
     # ---------------------------------------------------------------------
     # validation / training
@@ -365,7 +371,7 @@ class Exp2Forecast12H(Exp_Basic):
     def vali(self, model, vali_loader, criterion):
         total_loss = []
         previous_aggregation_mode = self._set_model_aggregation_mode(
-            getattr(self.args, 'train_val_aggregation_mode', getattr(self.args, 'aggregation_mode', None))
+            getattr(self.args, 'train_val_aggregation_mode', 'single')
         )
         model.eval()
         with torch.no_grad():
@@ -413,7 +419,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_x_mark,
                     dec_inp,
                     batch_y_mark,
-                    sample_times=getattr(self.args, 'vs_times', self.args.sample_times),
+                    sample_times=self._effective_sample_times(getattr(self.args, 'vs_times', self.args.sample_times), getattr(self.args, 'train_val_aggregation_mode', 'single')),
                     holiday_flag=batch_holiday,
                     future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
@@ -674,7 +680,7 @@ class Exp2Forecast12H(Exp_Basic):
             core_model._mom_kwargs['scaler_std'] = torch.tensor(test_data.scaler.std, dtype=torch.float32).squeeze(0)
         self.model.eval()
         previous_aggregation_mode = self._set_model_aggregation_mode(
-            getattr(self.args, 'test_aggregation_mode', getattr(self.args, 'aggregation_mode', None))
+            getattr(self.args, 'test_aggregation_mode', 'dca')
         )
 
         preds = []
@@ -710,7 +716,7 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_x_mark,
                     dec_inp,
                     batch_y_mark,
-                    sample_times=getattr(self.args, 'test_times', self.args.vs_times),
+                    sample_times=self._effective_sample_times(getattr(self.args, 'test_times', self.args.vs_times), getattr(self.args, 'test_aggregation_mode', 'dca')),
                     holiday_flag=batch_holiday,
                     future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )

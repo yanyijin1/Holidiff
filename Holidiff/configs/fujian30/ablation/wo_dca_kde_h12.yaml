@@ -94,7 +94,7 @@ order: 2
 diff_steps: 100
 
 train_val_aggregation_mode: single
-test_aggregation_mode: mean
+test_aggregation_mode: kde_mode
 dca_bandwidth_kde: 15.0
 dca_bandwidth_hist: 20.0
 dca_mode: joint
@@ -105,7 +105,7 @@ train_epochs: 30
 batch_size: 32
 patience: 20
 learning_rate: 0.001
-des: HoliDiff_ablation_wo_dca_mean
+des: HoliDiff_ablation_wo_dca_kde
 loss: MSE
 loss_type: MAE
 lradj: type1

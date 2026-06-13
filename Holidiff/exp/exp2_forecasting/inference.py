@@ -57,8 +57,8 @@ def load_cfg(p: Path):
     if yaml is None: raise RuntimeError(f'PyYAML import failed: {_yaml_import_error}')
     c = dict(yaml.safe_load(p.read_text(encoding='utf-8')))
     c['use_gpu'] = bool(c.get('use_gpu', True) and torch.cuda.is_available())
-    c['train_val_aggregation_mode'] = c.get('aggregation_mode', '')
-    c['test_aggregation_mode'] = c.get('aggregation_mode', '')
+    c['train_val_aggregation_mode'] = c.get('train_val_aggregation_mode', 'single')
+    c['test_aggregation_mode'] = c.get('test_aggregation_mode', 'dca')
     c['test_times'] = c.get('vs_times', c.get('sample_times', 1))
     if c.get('use_multi_gpu', False):
         d = str(c.get('devices', '0')).replace(' ', '')
@@ -74,8 +74,10 @@ def collect(spec):
     total_batches = len(dl)
     print(f'[collect] {label} <- {ckpt}', flush=True)
     print(f'[collect] {label}: {len(ds)} test samples, {total_batches} batches', flush=True)
-    exp._load_checkpoint_compat(str(ckpt)); exp.model.eval(); prev = exp._set_model_aggregation_mode(getattr(exp.args, 'test_aggregation_mode', getattr(exp.args, 'aggregation_mode', None)))
+    exp._load_checkpoint_compat(str(ckpt)); exp.model.eval(); prev = exp._set_model_aggregation_mode(getattr(exp.args, 'test_aggregation_mode', 'dca'))
     P=[]; Y=[]; X=[]; M=[]; H=[]
+    agg_mode = str(getattr(exp.args, 'test_aggregation_mode', 'dca')).lower()
+    sample_times = 1 if agg_mode == 'single' else int(getattr(exp.args, 'test_times', exp.args.vs_times))
     with torch.no_grad():
         for batch_idx, b in enumerate(dl, start=1):
             if batch_idx == 1 or batch_idx % 10 == 0 or batch_idx == total_batches:
@@ -83,7 +85,7 @@ def collect(spec):
             bx, by, bxm, bym = b[0].float().to(exp.device), b[1].float(), b[2].float().to(exp.device), b[3].float().to(exp.device)
             bm = b[4] if len(b) > 4 else None; bh = b[5] if len(b) > 5 else None
             dec = torch.zeros_like(by[:, -exp.args.pred_len:, :]).float(); dec = torch.cat([by[:, :exp.args.label_len, :], dec], 1).float().to(exp.device)
-            out = exp._run_model(exp.model, bx, bxm, dec, bym, sample_times=getattr(exp.args, 'test_times', exp.args.vs_times), holiday_flag=bh, future_target=by[:, -exp.args.pred_len:, :].to(exp.device))
+            out = exp._run_model(exp.model, bx, bxm, dec, bym, sample_times=sample_times, holiday_flag=bh, future_target=by[:, -exp.args.pred_len:, :].to(exp.device))
             out = out[0] if exp.args.is_diff else out; out = exp._process_model_output(out, is_diff=exp.args.is_diff)
             P.append(out.detach().cpu().numpy()); Y.append(by[:, -exp.args.pred_len:, :].numpy()); X.append(bx.detach().cpu().numpy())
             if bm is not None: M.append(bm.detach().cpu().numpy())

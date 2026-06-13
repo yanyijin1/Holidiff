@@ -1,18 +1,16 @@
-
 import torch
 import torch.nn.functional as F
 import numpy as np
 from functools import partial
 import torch.nn as nn
-from Holidiff.micro.tek import TEK
-from Holidiff.macro.dpm_sampler import DPMSolverSampler
-from Holidiff.macro.agg import build_macro_aggregator
-from Holidiff.models.simdiff.revin import RevIN
-from Holidiff.utils.diffusion_utils import *
-from Holidiff.frequency.build import build_frequency_patch_embed
-from Holidiff.micro.adapt import build_target_adapter
-from Holidiff.micro.inject import PhysicalInjectionModule
 
+from Holidiff.frequency.build import build_lstde_patch_embed
+from Holidiff.macro.agg import build_macro_aggregators
+from Holidiff.macro.dpm_sampler import DPMSolverSampler
+from Holidiff.micro.adapt import build_target_adapter
+from Holidiff.micro.inject import HybridTrendResidualCorrection
+from Holidiff.micro.tek import TEK
+from Holidiff.utils.diffusion_utils import *
 
 
 def cosine_beta_schedule(timesteps, s=5):
@@ -38,52 +36,53 @@ class HATEK(nn.Module):
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.diff_steps = configs.diff_steps
-        self.stride=configs.stride
-        self.patch_len=configs.patch_len
-        self.d_model=configs.d_model
-        self.e_layers=configs.e_layers
-        self.num_heads=configs.num_heads
+        self.stride = configs.stride
+        self.patch_len = configs.patch_len
+        self.d_model = configs.d_model
+        self.e_layers = configs.e_layers
+        self.num_heads = configs.num_heads
         self.rmom_n = configs.rmom
         self.n_blocks = configs.n_b
-        self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
-        self.use_holidiff_lstde = bool(getattr(configs, 'use_holidiff_lstde', True))
-        self.use_sfcn = bool(getattr(configs, 'use_sfcn', getattr(configs, 'spatial_field_enable', True)))
-        self.use_target_adapter = bool(getattr(configs, 'use_target_adapter', True))
-        self.use_frequency_patch_embed = self.use_holidiff_lstde and bool(getattr(configs, 'frequency_enable', False))
-        self.frequency_patch_embed = build_frequency_patch_embed(configs) if self.use_frequency_patch_embed else None
-        self.macro_aggregator = build_macro_aggregator(configs)
+        self.use_lstde = bool(getattr(configs, 'use_lstde', True))
+        self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
+        self.use_htrc = bool(getattr(configs, 'use_htrc', True))
+        self.aggregation_mode = str(getattr(configs, 'test_aggregation_mode', 'dca')).lower()
+        self.lstde_patch_embed = build_lstde_patch_embed(configs) if self.use_lstde else None
+        self.macro_aggregators = build_macro_aggregators(configs)
         self.target_adapter = build_target_adapter(configs)
-        self.physical_injection = PhysicalInjectionModule(configs)
+        self.htrc = HybridTrendResidualCorrection(configs)
         self.tek = TEK(configs)
-        self.revin_layer = RevIN(configs.enc_in, affine=True, subtract_last=False)
 
         self.enc_in = configs.enc_in
-        self.batch_size =configs.batch_size
-        self.beta_start = 1e-4 # 1e4
-        self.beta_end = 1e-1#2e-2
+        self.batch_size = configs.batch_size
+        self.beta_start = 1e-4
+        self.beta_end = 1e-1
         self.beta_schedule = 'cosine'
         self.v_posterior = 0.0
-        self.loss_type = "l1"
+        self.loss_type = 'l1'
         self.set_micro_uncertainty_schedule(None, self.beta_schedule, self.diff_steps, self.beta_start, self.beta_end)
         self.total_N = len(self.alphas_cumprod)
         self.T = 1.
         self.eps = 1e-5
         self.nn = self.tek
-        self.sampler = DPMSolverSampler(configs,self.nn, self.device,self.alphas_cumprod,self.betas.device)
-
+        self.sampler = DPMSolverSampler(configs, self.nn, self.device, self.alphas_cumprod, self.betas.device)
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, sample_times=5, holiday_flag=None, future_target=None,
                 mask_band=None, preset_noises=None):
         if self.training:
-            return self.forward_micro_generation_train(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                             enc_self_mask, dec_self_mask, dec_enc_mask, holiday_flag=holiday_flag, future_target=future_target,
-                                             mask_band=mask_band)
-        else:
-            return self.forward_consensus_inference(x_enc, x_mark_enc, x_dec, x_mark_dec,
-                                            enc_self_mask, dec_self_mask, dec_enc_mask, sample_times, holiday_flag=holiday_flag,
-                                            mask_band=mask_band, preset_noises=preset_noises)
-
+            return self.forward_micro_generation_train(
+                x_enc, x_mark_enc, x_dec, x_mark_dec,
+                enc_self_mask, dec_self_mask, dec_enc_mask,
+                holiday_flag=holiday_flag, future_target=future_target,
+                mask_band=mask_band,
+            )
+        return self.forward_consensus_inference(
+            x_enc, x_mark_enc, x_dec, x_mark_dec,
+            enc_self_mask, dec_self_mask, dec_enc_mask,
+            sample_times, holiday_flag=holiday_flag,
+            mask_band=mask_band, preset_noises=preset_noises,
+        )
 
     def forward_micro_generation_train(self, x_enc, x_mark_enc, x_dec, x_mark_dec,
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None, holiday_flag=None, future_target=None, mask_band=None):
@@ -95,18 +94,8 @@ class HATEK(nn.Module):
         f_dim = -1 if self.configs.features in ['MS'] else 0
         x = x[:, f_dim:, :]
         raw_history = x_enc.permute(0, 2, 1)
-        if self.use_target_adapter:
-            cond_ts = raw_history.clone()
-            cond_ts, train_stats = self.target_adapter.encode_inference_history(cond_ts, use_local_scaling=False)
-            x, _ = self.target_adapter.encode_training_future(x, raw_history, use_local_scaling=False)
-            use_revin_denorm = False
-        else:
-            cond_ts = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
-            node_count = x.shape[1]
-            mean_ = torch.mean(x[:, -node_count:, :], dim=1).unsqueeze(1)
-            std_ = torch.ones_like(torch.std(x, dim=1).unsqueeze(1))
-            x = (x - mean_.repeat(1, node_count, 1)) / (std_.repeat(1, node_count, 1) + 0.00001)
-            use_revin_denorm = True
+        cond_ts, train_stats = self.target_adapter.encode_inference_history(raw_history.clone(), use_local_scaling=False)
+        x, _ = self.target_adapter.encode_training_future(x, raw_history, use_local_scaling=False)
         B = np.shape(x)[0]
         N = self.configs.enc_in
         L1 = np.shape(cond_ts)[2]
@@ -115,20 +104,17 @@ class HATEK(nn.Module):
         cond_ts = torch.reshape(cond_ts, (B * N, L1))
         x = torch.reshape(x, (B * N, L2))
         frequency_patch_embedding = None
-        if self.frequency_patch_embed is not None:
-            frequency_patch_embedding = self.frequency_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
+        if self.lstde_patch_embed is not None:
+            frequency_patch_embedding = self.lstde_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
         t = torch.randint(0, self.num_timesteps, size=[B * N // 2,]).long().to(self.device)
         t = torch.cat([t, self.num_timesteps - 1 - t], dim=0)
         noise = torch.randn_like(x)
         x_k = self.generate_micro_realization(x_start=x, t=t, noise=noise)
         model_out = self.nn(x_k, t, cond_ts, x_mark_enc, raw_history=raw_history, frequency_patch_embedding=frequency_patch_embedding, mask_band=mask_band)
         model_out = torch.reshape(model_out, (B, N, target_len))
-        if use_revin_denorm:
-            model_out = self.revin_layer(model_out.permute(0, 2, 1), 'denorm').permute(0, 2, 1)
-        else:
-            model_out = self.target_adapter.decode_prediction(model_out, train_stats, use_local_scaling=False)
+        model_out = self.target_adapter.decode_prediction(model_out, train_stats, use_local_scaling=False)
         model_out = model_out.permute(0, 2, 1)
-        model_out = self.physical_injection.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
+        model_out = self.htrc.apply_output_residual(model_out, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
         weight_tmp = self.sqrt_one_minus_alphas_cumprod[t].reshape(B, N, 1)
         model_out = model_out.permute(0, 2, 1)
         return model_out, weight_tmp
@@ -147,20 +133,11 @@ class HATEK(nn.Module):
         B = np.shape(x_past)[0]
         N = self.configs.enc_in
         raw_history = x_enc.permute(0, 2, 1).to(self.betas.device)
-        if self.use_target_adapter:
-            x_past = raw_history.clone()
-            x_past, infer_stats = self.target_adapter.encode_inference_history(x_past, use_local_scaling=False)
-            x_past = x_past.to(self.betas.device)
-            use_revin_denorm = False
-        else:
-            x_past = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
-            x_past = x_past.to(self.betas.device)
-            infer_stats = {}
-            use_revin_denorm = True
+        x_past, infer_stats = self.target_adapter.encode_inference_history(raw_history.clone(), use_local_scaling=False)
         x_past = torch.reshape(x_past, (B * N, -1)).to(self.betas.device)
         frequency_patch_embedding = None
-        if self.frequency_patch_embed is not None:
-            frequency_patch_embedding = self.frequency_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
+        if self.lstde_patch_embed is not None:
+            frequency_patch_embedding = self.lstde_patch_embed(raw_history=raw_history, enc_in=self.configs.enc_in)
         for i in range(sample_times):
             if preset_noises is not None:
                 start_code = preset_noises[i].to(self.betas.device)
@@ -183,22 +160,18 @@ class HATEK(nn.Module):
             )
             diff_samples = diff_samples.to(self.betas.device)
             diff_samples = torch.reshape(diff_samples, (B, N, -1))
-            if use_revin_denorm:
-                diff_samples = self.revin_layer(diff_samples.permute(0, 2, 1), 'denorm')
-            else:
-                diff_samples = self.target_adapter.decode_prediction(diff_samples, infer_stats, use_local_scaling=False)
-                diff_samples = diff_samples.permute(0, 2, 1)
-            diff_samples = self.physical_injection.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
+            diff_samples = self.target_adapter.decode_prediction(diff_samples, infer_stats, use_local_scaling=False)
+            diff_samples = diff_samples.permute(0, 2, 1)
+            diff_samples = self.htrc.apply_output_residual(diff_samples, x_enc, is_training=self.training, x_mark_enc=x_mark_enc)
             all_outs.append(diff_samples)
         all_outs = torch.stack(all_outs, dim=0)
         outs = self._aggregate_samples(all_outs, history_context=history_for_trend)
 
-        return outs,all_outs.permute(1,0,2,3)
+        return outs, all_outs.permute(1, 0, 2, 3)
 
-    def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule="linear", diff_steps=1000, beta_start=1e-4, beta_end=2e-2
-    ):
+    def set_micro_uncertainty_schedule(self, given_betas=None, beta_schedule='linear', diff_steps=1000, beta_start=1e-4, beta_end=2e-2):
 
-        betas = cosine_beta_schedule(diff_steps,self.configs.coss)
+        betas = cosine_beta_schedule(diff_steps, self.configs.coss)
 
         alphas = 1. - betas
         alphas_cumprod = np.cumprod(alphas, axis=0)
@@ -221,17 +194,13 @@ class HATEK(nn.Module):
         self.register_buffer('sqrt_recip_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod)))
         self.register_buffer('sqrt_recipm1_alphas_cumprod', to_torch(np.sqrt(1. / alphas_cumprod - 1)))
 
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = (1 - self.v_posterior) * betas * (1. - alphas_cumprod_prev) / (
                     1. - alphas_cumprod) + self.v_posterior * betas
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
         self.register_buffer('posterior_variance', to_torch(posterior_variance))
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
         self.register_buffer('posterior_log_variance_clipped', to_torch(np.log(np.maximum(posterior_variance, 1e-20))))
         self.register_buffer('posterior_mean_coef1', to_torch(betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod)))
         self.register_buffer('posterior_mean_coef2', to_torch((1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod)))
         lvlb_weights = 0.8 * np.sqrt(torch.Tensor(alphas_cumprod)) / (2. * 1 - torch.Tensor(alphas_cumprod))
-
 
         lvlb_weights[0] = lvlb_weights[1]
         self.register_buffer('lvlb_weights', lvlb_weights, persistent=False)
@@ -239,7 +208,7 @@ class HATEK(nn.Module):
 
     def generate_micro_realization(self, x_start, t, noise=None):
 
-        noise = default(noise, lambda: self.scaling_noise * torch.randn_like(x_start))
+        noise = default(noise, lambda: torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
                 extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
 
@@ -247,28 +216,30 @@ class HATEK(nn.Module):
         return torch.sum(seq, dim=0) / seq.size(0)
 
     def _aggregate_samples(self, all_outs: torch.Tensor, history_context: torch.Tensor | None = None) -> torch.Tensor:
-        if all_outs.size(0) <= 1:
-            return all_outs.mean(0)
+        if all_outs.size(0) == 1:
+            return all_outs[0]
 
         mode = self.aggregation_mode
-        if mode in {'simple', 'single'}:
+        if mode == 'single':
+            return all_outs[0]
+        if mode == 'mean':
             return all_outs.mean(0)
         if mode == 'median':
             return torch.median(all_outs, dim=0)[0]
         if mode == 'mom':
             return self.extract_consensus(all_outs)
-        if self.macro_aggregator is not None and hasattr(self.macro_aggregator, 'aggregate_batch'):
-            return self.macro_aggregator.aggregate_batch(all_outs, history_context=history_context)
-
-        return all_outs.mean(0)
+        aggregator = self.macro_aggregators.get(mode)
+        if aggregator is not None and hasattr(aggregator, 'aggregate_batch'):
+            return aggregator.aggregate_batch(all_outs, history_context=history_context)
+        raise ValueError(f'Unsupported aggregation_mode: {mode}')
 
     def _consensus_reduce(self, tensor):
         if self.n_blocks > tensor.size(0):
-            self.n_blocks = int(torch.ceil(tensor.size(0) / 2))
+            self.n_blocks = max(1, (tensor.size(0) + 1) // 2)
 
         indic = torch.randperm(tensor.size(0))
         tensor = tensor[indic]
-        block_size = tensor.size(0) // self.n_blocks
+        block_size = max(1, tensor.size(0) // self.n_blocks)
 
         means = []
         for i in range(self.n_blocks):

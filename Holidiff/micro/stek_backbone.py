@@ -79,14 +79,14 @@ class STEKBackbone(nn.Module):
         self.stride = configs.stride
         self.d_model = configs.d_model
         self.n_blocks = configs.n_b
-        self.frequency_num_bands = int(getattr(configs, 'frequency_patch_embed_num_bands', getattr(configs, 'frequency_num_bands', 4)))
+        self.frequency_num_bands = int(getattr(configs, 'num_bands', 4))
         self.frequency_conditioner_dim = int(getattr(configs, 'frequency_conditioner_dim', 8))
         patch_num = int((configs.seq_len - self.patch_len) / self.stride + 1)
         patch_num_forecast = max(1, int((configs.pred_len - self.patch_len) / self.stride + 1))
         self.patch_num = patch_num
         self.patch_num_forecast = patch_num_forecast
         configs.d_ff = configs.d_model * 2
-        self.use_frequency_patch_embed = bool(getattr(configs, 'use_holidiff_lstde', True)) and bool(getattr(configs, 'frequency_enable', False))
+        self.use_frequency_patch_embed = bool(getattr(configs, 'use_lstde', True))
         self.patch_embedding = LocalPatchEmbedding(configs)
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))

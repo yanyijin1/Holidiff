@@ -7,8 +7,6 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from Holidiff.layers.RevIN import RevIN
-
 
 class FieldStatsProvider:
     def __init__(self, root_path: str, enc_in: int, adj_file: str):
@@ -29,17 +27,6 @@ class FieldStatsProvider:
                 adj[node_to_idx[int(row['src_FID'])], node_to_idx[int(row['nbr_FID'])]] = 1.0
             return adj
         return torch.tensor(adj_df.values, dtype=torch.float32)
-
-    def compute_node_stats(self, train_series: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        return train_series.mean(dim=-1, keepdim=True), train_series.std(dim=-1, keepdim=True)
-
-    def compute_field_stats(self, train_series: torch.Tensor, graph: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x_i = train_series.unsqueeze(2)
-        x_j = train_series.unsqueeze(1)
-        edge_flow = x_j - x_i
-        edge_mean = edge_flow.mean(dim=-1)
-        edge_var = edge_flow.std(dim=-1) + 1e-5
-        return edge_mean * graph.unsqueeze(0), edge_var * graph.unsqueeze(0)
 
 
 class BaseTargetSpaceAdapter(nn.Module):
@@ -111,8 +98,6 @@ class SFCN(VanillaNIAdapter):
         coupling_init: float = 0.05,
         eps: float = 1e-5,
         edge_var_window: int = 720,
-        field_stats_source: str = 'future',
-        decode_use_edge_mean: bool = False,
     ):
         super().__init__(eps=eps)
         adj = adj.float()
@@ -121,8 +106,6 @@ class SFCN(VanillaNIAdapter):
         self.register_buffer('field_mask', adj / degree)
         self.coupling = nn.Parameter(torch.tensor(float(coupling_init)), requires_grad=False)
         self.edge_var_window = int(edge_var_window)
-        self.field_stats_source = field_stats_source
-        self.decode_use_edge_mean = bool(decode_use_edge_mean)
 
     def get_coupling_value(self) -> torch.Tensor:
         return torch.nn.functional.softplus(self.coupling).detach()
@@ -131,11 +114,6 @@ class SFCN(VanillaNIAdapter):
         if self.edge_var_window <= 0 or x.size(-1) <= self.edge_var_window:
             return x
         return x[..., -self.edge_var_window:]
-
-    def _select_field_stats_source(self, x_future: torch.Tensor, x_history: torch.Tensor) -> torch.Tensor:
-        if self.field_stats_source == 'future':
-            return x_future
-        return x_history
 
     def compute_field_stats(self, x: torch.Tensor):
         x = self._apply_edge_window(x)
@@ -156,8 +134,7 @@ class SFCN(VanillaNIAdapter):
 
     def encode_training_future(self, x_future: torch.Tensor, x_history: torch.Tensor, use_local_scaling: bool):
         node_mean, node_scale = self._compute_node_stats(x_future)
-        field_stats_input = self._select_field_stats_source(x_future, x_history)
-        edge_mean, edge_var = self.compute_field_stats(field_stats_input)
+        edge_mean, edge_var = self.compute_field_stats(x_future)
         node_res = (x_future - node_mean) / (node_scale + self.eps)
         field_res = self._compute_field_residual(x_future, edge_mean, edge_var)
         alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
@@ -165,21 +142,18 @@ class SFCN(VanillaNIAdapter):
         return target, {
             'node_mean': node_mean,
             'node_scale': node_scale,
-            'edge_mean': edge_mean,
             'edge_var': edge_var,
             'alpha': alpha,
         }
 
     def encode_inference_history(self, x_history: torch.Tensor, use_local_scaling: bool):
         node_mean, node_scale = self._compute_node_stats(x_history)
-        # normalize history into the same space as encode_training_future
         x_norm = (x_history - node_mean) / (node_scale + self.eps)
-        edge_mean, edge_var = self.compute_field_stats(x_norm)
+        _, edge_var = self.compute_field_stats(x_norm)
         alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
         return x_norm, {
             'node_mean': node_mean,
             'node_scale': node_scale,
-            'edge_mean': edge_mean,
             'edge_var': edge_var,
             'alpha': alpha,
         }
@@ -187,76 +161,35 @@ class SFCN(VanillaNIAdapter):
     def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool):
         node_mean = stats.get('node_mean')
         node_scale = stats.get('node_scale')
-        edge_mean = stats.get('edge_mean')
         edge_var = stats.get('edge_var')
         alpha = stats.get('alpha')
         if node_mean is None or node_scale is None:
             return pred
         if edge_var is not None:
-            # field correction in normalized space, then denormalize once
             z_i = pred.unsqueeze(2)
             z_j = pred.unsqueeze(1)
             z_diff = z_j - z_i
-            field_delta = edge_var.unsqueeze(-1) * z_diff
-            if self.decode_use_edge_mean and edge_mean is not None:
-                field_delta = field_delta + edge_mean.unsqueeze(-1)
-            field_res = (self.field_mask.unsqueeze(0).unsqueeze(-1) * field_delta).sum(dim=2)
+            field_res = (self.field_mask.unsqueeze(0).unsqueeze(-1) * edge_var.unsqueeze(-1) * z_diff).sum(dim=2)
             if alpha is None:
                 alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
             pred = pred + alpha * field_res
         return pred * (node_scale + self.eps) + node_mean
 
 
-class IdentityLocalScaling(nn.Module):
-    def scale(self, x: torch.Tensor) -> torch.Tensor:
-        return x
-
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        return x
-
-
-class LocalAdaptiveScaling(nn.Module):
-    def __init__(self, num_features: int, enabled: bool = True, affine: bool = True, subtract_last: bool = False):
-        super().__init__()
-        self.enabled = enabled
-        self.revin = RevIN(num_features, affine=affine, subtract_last=subtract_last) if enabled else None
-
-    def scale(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.enabled or self.revin is None:
-            return x
-        return self.revin(x, 'norm')
-
-    def normalize(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.enabled or self.revin is None:
-            return x
-        return self.revin(x, 'denorm')
-
-
 def _build_field_stats_provider(configs) -> FieldStatsProvider:
     return FieldStatsProvider(
         root_path=getattr(configs, 'root_path', ''),
         enc_in=int(getattr(configs, 'enc_in', 30)),
-        adj_file=getattr(configs, 'spatial_graph_file', 'adjacent_gantry.csv'),
+        adj_file=getattr(configs, 'sfcn_graph_file', 'adjacent_gantry.csv'),
     )
 
 
 def build_target_adapter(configs):
-    spatial_field_enable = bool(getattr(configs, 'spatial_field_enable', getattr(configs, 'use_sfcn', False)))
-    if spatial_field_enable:
+    if bool(getattr(configs, 'use_sfcn', True)):
         provider = _build_field_stats_provider(configs)
         return SFCN(
             adj=provider.load_graph(),
-            coupling_init=float(getattr(configs, 'spatial_field_coupling_init', 0.05)),
-            edge_var_window=int(getattr(configs, 'spatial_field_variance_window', 720)),
-            field_stats_source=getattr(configs, 'spatial_field_stats_source', 'future'),
-            decode_use_edge_mean=bool(getattr(configs, 'spatial_field_decode_use_edge_mean', False)),
+            coupling_init=float(getattr(configs, 'sfcn_coupling_init', 0.05)),
+            edge_var_window=int(getattr(configs, 'sfcn_variance_window', 720)),
         )
     return VanillaNIAdapter()
-
-
-def build_revin_adapter(configs):
-    enabled = bool(getattr(configs, 'local_scaling_enable', 0))
-    num_features = int(getattr(configs, 'enc_in', 1))
-    if not enabled:
-        return IdentityLocalScaling()
-    return LocalAdaptiveScaling(num_features=num_features, enabled=True, affine=True, subtract_last=False)

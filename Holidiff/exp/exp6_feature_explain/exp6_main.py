@@ -1,4 +1,4 @@
-AGGREGATOR_CANDIDATES = ['dca', 'mom', 'simple', 'median']
+AGGREGATOR_CANDIDATES = ['dca', 'kde_mode', 'mom', 'median', 'mean', 'single']
 
 
 class Exp6FeatureExplain:

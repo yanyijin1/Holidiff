@@ -54,8 +54,32 @@ seg_len: 48
 stride: 6
 patch_len: 12
 data_stride: 1
-use_holidiff_lstde: true
+
+use_lstde: true
 use_sfcn: true
+use_htrc: true
+
+num_bands: 4
+lstde_patch_fusion: concat_proj
+
+sfcn_graph_file: adjacent_gantry.csv
+sfcn_coupling_init: 0.05
+sfcn_variance_window: 720
+
+htrc_time_eta: 0.5
+htrc_free_flow_epsilon: 0.0
+htrc_band_eta_init:
+- 0.2
+- 0.5
+- 1.0
+- 1.2
+htrc_band_beta_init:
+- 0.15
+- 0.2
+- 0.3
+- 0.35
+htrc_mix_alpha: 0.5
+
 coss: 5.0
 rmom: 20
 n_b: 5
@@ -68,28 +92,12 @@ method: multistep
 lower_order_final: true
 order: 2
 diff_steps: 100
-aggregation_mode: mom
+
+train_val_aggregation_mode: single
+test_aggregation_mode: mom
 dca_bandwidth_kde: 15.0
 dca_bandwidth_hist: 20.0
 dca_mode: joint
-physical_injection_enable: true
-physical_residual_enable: true
-physical_residual_eta: 0.5
-physical_free_flow_epsilon: 0.0
-frequency_enable: true
-frequency_num_bands: 4
-frequency_patch_embed_fusion: concat_proj
-frequency_patch_embed_num_bands: 4
-frequency_eta_init: [0.2, 0.5, 1.0, 1.2]
-frequency_beta_init: [0.15, 0.2, 0.3, 0.35]
-frequency_use_softplus_eta: true
-frequency_hybrid_mix_alpha: 0.5
-phase_e_enable: false
-phase_e_adj_file: adjacent_gantry.csv
-phase_e_zeta_init: 0.05
-phase_e_edge_var_window: 720
-phase_e_field_stats_source: future
-holiday_enable: false
 
 num_workers: 0
 itr: 1
@@ -109,8 +117,11 @@ gpu: 0
 use_multi_gpu: false
 devices: '0'
 
-p_hidden_dims: [128, 128]
+p_hidden_dims:
+- 128
+- 128
 p_hidden_layers: 2
+
 use_dtw: false
 augmentation_ratio: 0
 seed: 2021
@@ -130,11 +141,10 @@ shapedtwwarp: false
 wdba: false
 discdtw: false
 discsdtw: false
+
 extra_tag: ''
 mode: standard
 eval_gamma: 0.5
 eval_delta_t: 1.0
 eval_peak_radius: 1
 eval_bandwidth_scale: 0.5
-train_val_aggregation_mode: mom
-test_aggregation_mode: mom

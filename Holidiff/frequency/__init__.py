@@ -1,7 +1,7 @@
 from .build import (
-    build_frequency_decomposer,
-    build_frequency_patch_embed,
-    build_frequency_residual,
+    build_band_decomposer,
+    build_htrc_residual,
+    build_lstde_patch_embed,
 )
 from .residual import (
     TimeResidualModule,
@@ -13,9 +13,9 @@ from .spec import BandSpecificTrendAwarePatchEmbed, FixedBandDecomposer
 __all__ = [
     'BandSpecificTrendAwarePatchEmbed',
     'FixedBandDecomposer',
-    'build_frequency_decomposer',
-    'build_frequency_patch_embed',
-    'build_frequency_residual',
+    'build_band_decomposer',
+    'build_htrc_residual',
+    'build_lstde_patch_embed',
     'TimeResidualModule',
     'FrequencyResidualModule',
     'HybridResidualModule',

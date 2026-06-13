@@ -61,17 +61,14 @@ def print_args(args):
     print(f'  {"Lradj:":<20}{g("lradj", "-"):<20}{"Use Amp:":<20}{g("use_amp", "-"):<20}')
     print()
 
-    if hasattr(args, 'physical_injection_enable') or hasattr(args, 'frequency_enable'):
-        print("\033[1m" + "Physical / Frequency Modules" + "\033[0m")
-        if hasattr(args, 'physical_injection_enable'):
-            print(f'  {"Physical Injection:":<20}{g("physical_injection_enable", False):<20}{"Physical Residual:":<20}{g("physical_residual_enable", False):<20}')
-            print(f'  {"Residual Eta:":<20}{g("physical_residual_eta", 0.0):<20}{"FreeFlow Eps:":<20}{g("physical_free_flow_epsilon", 0.0):<20}')
-        if hasattr(args, 'frequency_enable'):
-            print(f'  {"Frequency Enable:":<20}{g("frequency_enable", False):<20}{"Freq Decomp:":<20}{g("frequency_decomp_type", "fixed_fft"):<20}')
-            print(f'  {"Freq Residual:":<20}{g("frequency_residual_type", "hybrid_residual"):<20}{"Num Bands:":<20}{g("frequency_num_bands", 0):<20}')
-            print(f'  {"Freq Inject:":<20}{g("frequency_injection_mode", "embed_replace"):<20}{"Hybrid Mix:":<20}{g("frequency_hybrid_mix_alpha", 0.0):<20}')
-            if hasattr(args, 'frequency_conditioner_mode'):
-                print(f'  {"Freq Cond Mode:":<20}{g("frequency_conditioner_mode"):<20}{"Cond Dim:":<20}{g("frequency_conditioner_dim"):<20}')
+    if any(hasattr(args, name) for name in ['use_lstde', 'use_sfcn', 'use_htrc']):
+        print("\033[1m" + "HoliDiff Modules" + "\033[0m")
+        print(f'  {"Use LSTDE:":<20}{g("use_lstde", False):<20}{"Use SFCN:":<20}{g("use_sfcn", False):<20}')
+        print(f'  {"Use HTRC:":<20}{g("use_htrc", False):<20}{"Num Bands:":<20}{g("num_bands", 0):<20}')
+        print(f'  {"Train/Val Agg:":<20}{g("train_val_aggregation_mode", "single"):<20}{"Test Agg:":<20}{g("test_aggregation_mode", "dca"):<20}')
+        print(f'  {"LSTDE Fusion:":<20}{g("lstde_patch_fusion", "concat_proj"):<20}{"SFCN Window:":<20}{g("sfcn_variance_window", 0):<20}')
+        print(f'  {"SFCN Coupling:":<20}{g("sfcn_coupling_init", 0.0):<20}{"HTRC Mix:":<20}{g("htrc_mix_alpha", 0.0):<20}')
+        print(f'  {"HTRC Time Eta:":<20}{g("htrc_time_eta", 0.0):<20}{"FreeFlow Eps:":<20}{g("htrc_free_flow_epsilon", 0.0):<20}')
         print()
 
     print("\033[1m" + "GPU" + "\033[0m")

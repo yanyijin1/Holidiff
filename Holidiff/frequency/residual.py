@@ -10,9 +10,9 @@ from .utils import build_horizon_steps, compute_time_slope
 
 
 class TimeResidualModule(nn.Module):
-    def __init__(self, eta: float = 0.5, free_flow_epsilon: float = 0.0, enc_in: Optional[int] = None, learnable_eta: bool = False):
+    def __init__(self, eta: float = 0.5, free_flow_epsilon: float = 0.0, enc_in: Optional[int] = None):
         super().__init__()
-        self.eta = nn.Parameter(torch.tensor(float(eta), dtype=torch.float32), requires_grad=learnable_eta)
+        self.eta = nn.Parameter(torch.tensor(float(eta), dtype=torch.float32))
         self.free_flow_epsilon = free_flow_epsilon
         self.enc_in = enc_in
 
@@ -33,9 +33,6 @@ class FrequencyResidualModule(nn.Module):
         decomposer: nn.Module,
         eta_init: Optional[List[float]] = None,
         beta_init: Optional[List[float]] = None,
-        use_learnable_beta: bool = False,
-        learnable_eta: bool = False,
-        use_softplus_eta: bool = True,
         free_flow_epsilon: float = 0.0,
         enc_in: Optional[int] = None,
     ):
@@ -43,15 +40,11 @@ class FrequencyResidualModule(nn.Module):
         self.decomposer = decomposer
         eta_init = eta_init or [0.2, 0.5, 1.0, 1.2]
         beta_init = beta_init or [0.15, 0.2, 0.3, 0.35]
-        self.use_softplus_eta = use_softplus_eta
         self.free_flow_epsilon = free_flow_epsilon
         self.enc_in = enc_in
-        if use_softplus_eta:
-            eta_tensor = torch.log(torch.expm1(torch.tensor(eta_init, dtype=torch.float32)).clamp_min(1e-6))
-        else:
-            eta_tensor = torch.tensor(eta_init, dtype=torch.float32)
-        self.eta = nn.Parameter(eta_tensor, requires_grad=learnable_eta)
-        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32), requires_grad=use_learnable_beta)
+        eta_tensor = torch.log(torch.expm1(torch.tensor(eta_init, dtype=torch.float32)).clamp_min(1e-6))
+        self.eta = nn.Parameter(eta_tensor)
+        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32))
 
     def _band_slope(self, band_history: torch.Tensor) -> Optional[torch.Tensor]:
         if band_history is None or band_history.size(-1) <= 1:
@@ -67,7 +60,7 @@ class FrequencyResidualModule(nn.Module):
             return pred
 
         steps = build_horizon_steps(pred.size(1), pred.device, pred.dtype)
-        eta = F.softplus(self.eta) if self.use_softplus_eta else self.eta
+        eta = F.softplus(self.eta)
         beta = self.beta / self.beta.sum().clamp_min(1e-8)
 
         correction = torch.zeros_like(pred)
