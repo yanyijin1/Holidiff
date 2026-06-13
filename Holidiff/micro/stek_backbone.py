@@ -86,7 +86,7 @@ class STEKBackbone(nn.Module):
         self.patch_num = patch_num
         self.patch_num_forecast = patch_num_forecast
         configs.d_ff = configs.d_model * 2
-        self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
+        self.use_frequency_patch_embed = bool(getattr(configs, 'use_holidiff_lstde', True)) and bool(getattr(configs, 'frequency_enable', False))
         self.patch_embedding = LocalPatchEmbedding(configs)
         self.input_dropout = nn.Dropout(configs.dropout)
         self.cls = nn.Sequential(nn.Linear(1, configs.d_model))
@@ -113,7 +113,7 @@ class STEKBackbone(nn.Module):
         future_tokens = micro_realization.unfold(dimension=-1, size=self.patch_len, step=self.stride)
         state_tokens = torch.cat([hist_tokens, future_tokens], dim=-2)
         state_embeddings = self.input_dropout(self.patch_embedding(state_tokens))
-        if self.use_sfcn and frequency_patch_embedding is not None:
+        if self.use_frequency_patch_embed and frequency_patch_embedding is not None:
             if mask_band is not None:
                 num_bands = max(1, int(getattr(self, 'frequency_num_bands', 4) if hasattr(self, 'frequency_num_bands') else 4))
                 band_width = max(1, frequency_patch_embedding.size(-1) // num_bands)

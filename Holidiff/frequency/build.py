@@ -22,6 +22,7 @@ def build_frequency_residual(configs):
         eta=float(getattr(configs, 'physical_residual_eta', 0.5)),
         free_flow_epsilon=free_flow_epsilon,
         enc_in=enc_in,
+        learnable_eta=bool(getattr(configs, 'physical_residual_learnable_eta', False)),
     )
     if not frequency_enable:
         return time_module
@@ -31,6 +32,7 @@ def build_frequency_residual(configs):
         eta_init=list(getattr(configs, 'frequency_eta_init', [0.2, 0.5, 1.0])),
         beta_init=list(getattr(configs, 'frequency_beta_init', [0.2, 0.3, 0.5])),
         use_learnable_beta=bool(getattr(configs, 'frequency_use_learnable_beta', False)),
+        learnable_eta=bool(getattr(configs, 'frequency_use_learnable_eta', False)),
         use_softplus_eta=bool(getattr(configs, 'frequency_use_softplus_eta', True)),
         free_flow_epsilon=free_flow_epsilon,
         enc_in=enc_in,

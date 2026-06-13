@@ -10,19 +10,20 @@ from .utils import build_horizon_steps, compute_time_slope
 
 
 class TimeResidualModule(nn.Module):
-    def __init__(self, eta: float = 0.5, free_flow_epsilon: float = 0.0, enc_in: Optional[int] = None):
+    def __init__(self, eta: float = 0.5, free_flow_epsilon: float = 0.0, enc_in: Optional[int] = None, learnable_eta: bool = False):
         super().__init__()
-        self.eta = eta
+        self.eta = nn.Parameter(torch.tensor(float(eta), dtype=torch.float32), requires_grad=learnable_eta)
         self.free_flow_epsilon = free_flow_epsilon
         self.enc_in = enc_in
 
     def apply_output_residual(self, pred, raw_history, is_training=False, x_mark_enc=None):
         slope = compute_time_slope(raw_history, free_flow_epsilon=self.free_flow_epsilon, enc_in=self.enc_in)
-        if slope is None or self.eta == 0.0:
+        if slope is None:
             return pred
         slope = slope.to(device=pred.device, dtype=pred.dtype)
+        eta = self.eta.to(device=pred.device, dtype=pred.dtype).view(1, 1, 1)
         steps = build_horizon_steps(pred.size(1), pred.device, pred.dtype)
-        correction = self.eta * slope.unsqueeze(1) * steps
+        correction = eta * slope.unsqueeze(1) * steps
         return pred + correction
 
 
@@ -33,6 +34,7 @@ class FrequencyResidualModule(nn.Module):
         eta_init: Optional[List[float]] = None,
         beta_init: Optional[List[float]] = None,
         use_learnable_beta: bool = False,
+        learnable_eta: bool = False,
         use_softplus_eta: bool = True,
         free_flow_epsilon: float = 0.0,
         enc_in: Optional[int] = None,
@@ -48,8 +50,8 @@ class FrequencyResidualModule(nn.Module):
             eta_tensor = torch.log(torch.expm1(torch.tensor(eta_init, dtype=torch.float32)).clamp_min(1e-6))
         else:
             eta_tensor = torch.tensor(eta_init, dtype=torch.float32)
-        self.eta = nn.Parameter(eta_tensor, requires_grad=False)
-        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32), requires_grad=False)
+        self.eta = nn.Parameter(eta_tensor, requires_grad=learnable_eta)
+        self.beta = nn.Parameter(torch.tensor(beta_init, dtype=torch.float32), requires_grad=use_learnable_beta)
 
     def _band_slope(self, band_history: torch.Tensor) -> Optional[torch.Tensor]:
         if band_history is None or band_history.size(-1) <= 1:

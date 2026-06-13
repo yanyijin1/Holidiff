@@ -83,7 +83,7 @@ class VanillaNIAdapter(BaseTargetSpaceAdapter):
             node_mean = torch.mean(x_future[:, -node_count:, :], dim=1, keepdim=True)
             node_scale = torch.ones_like(torch.std(x_future, dim=1, keepdim=True))
         else:
-            node_mean, node_scale = self._compute_node_stats(x_history)
+            node_mean, node_scale = self._compute_node_stats(x_future)
         x_norm = (x_future - node_mean) / (node_scale + self.eps)
         return x_norm, {'node_mean': node_mean, 'node_scale': node_scale}
 
@@ -112,6 +112,7 @@ class SFCN(VanillaNIAdapter):
         eps: float = 1e-5,
         edge_var_window: int = 720,
         field_stats_source: str = 'future',
+        decode_use_edge_mean: bool = False,
     ):
         super().__init__(eps=eps)
         adj = adj.float()
@@ -121,6 +122,7 @@ class SFCN(VanillaNIAdapter):
         self.coupling = nn.Parameter(torch.tensor(float(coupling_init)), requires_grad=False)
         self.edge_var_window = int(edge_var_window)
         self.field_stats_source = field_stats_source
+        self.decode_use_edge_mean = bool(decode_use_edge_mean)
 
     def get_coupling_value(self) -> torch.Tensor:
         return torch.nn.functional.softplus(self.coupling).detach()
@@ -185,6 +187,7 @@ class SFCN(VanillaNIAdapter):
     def decode_prediction(self, pred: torch.Tensor, stats: Dict[str, torch.Tensor], use_local_scaling: bool):
         node_mean = stats.get('node_mean')
         node_scale = stats.get('node_scale')
+        edge_mean = stats.get('edge_mean')
         edge_var = stats.get('edge_var')
         alpha = stats.get('alpha')
         if node_mean is None or node_scale is None:
@@ -194,7 +197,10 @@ class SFCN(VanillaNIAdapter):
             z_i = pred.unsqueeze(2)
             z_j = pred.unsqueeze(1)
             z_diff = z_j - z_i
-            field_res = (self.field_mask.unsqueeze(0).unsqueeze(-1) * edge_var.unsqueeze(-1) * z_diff).sum(dim=2)
+            field_delta = edge_var.unsqueeze(-1) * z_diff
+            if self.decode_use_edge_mean and edge_mean is not None:
+                field_delta = field_delta + edge_mean.unsqueeze(-1)
+            field_res = (self.field_mask.unsqueeze(0).unsqueeze(-1) * field_delta).sum(dim=2)
             if alpha is None:
                 alpha = torch.nn.functional.softplus(self.coupling).view(1, 1, 1)
             pred = pred + alpha * field_res
@@ -235,7 +241,7 @@ def _build_field_stats_provider(configs) -> FieldStatsProvider:
 
 
 def build_target_adapter(configs):
-    spatial_field_enable = bool(getattr(configs, 'spatial_field_enable', False))
+    spatial_field_enable = bool(getattr(configs, 'spatial_field_enable', getattr(configs, 'use_sfcn', False)))
     if spatial_field_enable:
         provider = _build_field_stats_provider(configs)
         return SFCN(
@@ -243,6 +249,7 @@ def build_target_adapter(configs):
             coupling_init=float(getattr(configs, 'spatial_field_coupling_init', 0.05)),
             edge_var_window=int(getattr(configs, 'spatial_field_variance_window', 720)),
             field_stats_source=getattr(configs, 'spatial_field_stats_source', 'future'),
+            decode_use_edge_mean=bool(getattr(configs, 'spatial_field_decode_use_edge_mean', False)),
         )
     return VanillaNIAdapter()
 

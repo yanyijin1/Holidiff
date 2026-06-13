@@ -47,8 +47,10 @@ class HATEK(nn.Module):
         self.n_blocks = configs.n_b
         self.aggregation_mode = str(getattr(configs, 'aggregation_mode', 'mom')).lower()
         self.use_holidiff_lstde = bool(getattr(configs, 'use_holidiff_lstde', True))
-        self.use_sfcn = bool(getattr(configs, 'use_sfcn', True))
-        self.frequency_patch_embed = build_frequency_patch_embed(configs) if self.use_sfcn else None
+        self.use_sfcn = bool(getattr(configs, 'use_sfcn', getattr(configs, 'spatial_field_enable', True)))
+        self.use_target_adapter = bool(getattr(configs, 'use_target_adapter', True))
+        self.use_frequency_patch_embed = self.use_holidiff_lstde and bool(getattr(configs, 'frequency_enable', False))
+        self.frequency_patch_embed = build_frequency_patch_embed(configs) if self.use_frequency_patch_embed else None
         self.macro_aggregator = build_macro_aggregator(configs)
         self.target_adapter = build_target_adapter(configs)
         self.physical_injection = PhysicalInjectionModule(configs)
@@ -92,21 +94,18 @@ class HATEK(nn.Module):
             x = F.pad(x, (0, pad_len), mode='replicate')
         f_dim = -1 if self.configs.features in ['MS'] else 0
         x = x[:, f_dim:, :]
-        if self.use_holidiff_lstde:
-            cond_ts = x_enc.permute(0, 2, 1)
-            raw_history = cond_ts.clone()
+        raw_history = x_enc.permute(0, 2, 1)
+        if self.use_target_adapter:
+            cond_ts = raw_history.clone()
             cond_ts, train_stats = self.target_adapter.encode_inference_history(cond_ts, use_local_scaling=False)
-            x, _ = self.target_adapter.encode_training_future(x, cond_ts, use_local_scaling=False)
+            x, _ = self.target_adapter.encode_training_future(x, raw_history, use_local_scaling=False)
             use_revin_denorm = False
         else:
             cond_ts = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
-            raw_history = x_enc.permute(0, 2, 1)
             node_count = x.shape[1]
             mean_ = torch.mean(x[:, -node_count:, :], dim=1).unsqueeze(1)
             std_ = torch.ones_like(torch.std(x, dim=1).unsqueeze(1))
             x = (x - mean_.repeat(1, node_count, 1)) / (std_.repeat(1, node_count, 1) + 0.00001)
-            denorm_mean = None
-            denorm_std = None
             use_revin_denorm = True
         B = np.shape(x)[0]
         N = self.configs.enc_in
@@ -147,14 +146,14 @@ class HATEK(nn.Module):
         all_outs = []
         B = np.shape(x_past)[0]
         N = self.configs.enc_in
-        if self.use_holidiff_lstde:
-            raw_history = x_past.clone()
+        raw_history = x_enc.permute(0, 2, 1).to(self.betas.device)
+        if self.use_target_adapter:
+            x_past = raw_history.clone()
             x_past, infer_stats = self.target_adapter.encode_inference_history(x_past, use_local_scaling=False)
             x_past = x_past.to(self.betas.device)
             use_revin_denorm = False
         else:
             x_past = self.revin_layer(x_enc, 'norm').permute(0, 2, 1)
-            raw_history = x_enc.permute(0, 2, 1).to(self.betas.device)
             x_past = x_past.to(self.betas.device)
             infer_stats = {}
             use_revin_denorm = True
