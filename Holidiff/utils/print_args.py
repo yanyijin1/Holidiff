@@ -1,3 +1,25 @@
+def _format_param_count(count):
+    if count >= 1_000_000_000:
+        return f'{count:,} ({count / 1_000_000_000:.3f} B)'
+    if count >= 1_000_000:
+        return f'{count:,} ({count / 1_000_000:.3f} M)'
+    if count >= 1_000:
+        return f'{count:,} ({count / 1_000:.3f} K)'
+    return str(count)
+
+
+def print_model_param_stats(model, model_name=''):
+    total_params = sum(param.numel() for param in model.parameters())
+    trainable_params = sum(param.numel() for param in model.parameters() if param.requires_grad)
+    frozen_params = total_params - trainable_params
+    header = f'{model_name} Parameter Stats' if model_name else 'Model Parameter Stats'
+
+    print("\033[1m" + header + "\033[0m")
+    print(f'  {"Total Params:":<20}{_format_param_count(total_params):<28}{"Trainable:":<20}{_format_param_count(trainable_params):<28}')
+    print(f'  {"Frozen Params:":<20}{_format_param_count(frozen_params):<28}')
+    print()
+
+
 def print_args(args):
     from Holidiff.utils.display_name import get_display_name
 

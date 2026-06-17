@@ -41,6 +41,9 @@ def data_provider(args, flag):
         holiday_col=getattr(args, 'holiday_col', 'is_holiday'),
         zero_as_missing=getattr(args, 'zero_as_missing', False),
         extreme_filter_threshold=getattr(args, 'extreme_filter_threshold', None),
+        train_ratio=getattr(args, 'train_ratio', 0.7),
+        val_ratio=getattr(args, 'val_ratio', 0.1),
+        history_ratio=getattr(args, 'history_ratio', getattr(args, 'train_ratio', 0.7)),
     )
 
     print(flag, len(data_set))

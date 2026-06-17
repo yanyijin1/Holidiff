@@ -57,7 +57,7 @@ data_stride: 1
 
 use_lstde: false
 use_sfcn: true
-use_htrc: true
+use_htrc: false
 
 num_bands: 4
 lstde_patch_fusion: concat_proj

@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 import sys
+import time
 from pathlib import Path
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -106,6 +107,21 @@ def _build_parser():
     parser.add_argument('--config', type=str, required=True, help='Path to yaml config')
     parser.add_argument('--version', type=str, default='', help='Short experiment version used in checkpoint/result naming')
     parser.add_argument('--load_checkpoint', type=str, default='', help='Optional explicit checkpoint path for test-only runs')
+    parser.add_argument(
+        '--history_ratio',
+        type=float,
+        default=0.70,
+        help=(
+            'Continuous training history ratio over the full time series. '
+            'For a 7:1:2 split, this must be in (0, 0.70]. '
+            'Train uses the tail segment [0.7T-history_ratio*T, 0.7T). '
+            'Validation and test remain fixed.'
+        ),
+    )
+    parser.add_argument('--train_ratio', type=float, default=0.7, help='Chronological train split ratio over the full time series.')
+    parser.add_argument('--val_ratio', type=float, default=0.1, help='Chronological validation split ratio over the full time series.')
+    parser.add_argument('--save_dir', type=str, default='', help='Optional explicit run directory for checkpoints and saved metrics.')
+    parser.add_argument('--dataset_name', type=str, default='', help='Optional dataset display name used in saved metrics.')
     return parser
 
 
@@ -124,6 +140,11 @@ CLI_OVERRIDE_KEYS = {
     'config',
     'version',
     'load_checkpoint',
+    'history_ratio',
+    'train_ratio',
+    'val_ratio',
+    'save_dir',
+    'dataset_name',
     'eval_gamma',
     'eval_delta_t',
     'eval_peak_radius',
@@ -194,6 +215,11 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=str, default=base_args.config)
     parser.add_argument('--version', type=str, default=cfg.get('version', base_args.version))
     parser.add_argument('--load_checkpoint', type=str, default=cfg.get('load_checkpoint', base_args.load_checkpoint))
+    parser.add_argument('--history_ratio', type=float, default=cfg.get('history_ratio', getattr(base_args, 'history_ratio', 0.70)))
+    parser.add_argument('--train_ratio', type=float, default=cfg.get('train_ratio', getattr(base_args, 'train_ratio', 0.7)))
+    parser.add_argument('--val_ratio', type=float, default=cfg.get('val_ratio', getattr(base_args, 'val_ratio', 0.1)))
+    parser.add_argument('--save_dir', type=str, default=cfg.get('save_dir', getattr(base_args, 'save_dir', '')))
+    parser.add_argument('--dataset_name', type=str, default=cfg.get('dataset_name', getattr(base_args, 'dataset_name', '')))
     parser.add_argument('--train_val_aggregation_mode', type=str, default=cfg.get('train_val_aggregation_mode', 'single'))
     parser.add_argument('--test_aggregation_mode', type=str, default=cfg.get('test_aggregation_mode', 'dca'))
     parser.add_argument('--test_times', type=int, default=cfg.get('test_times', cfg.get('vs_times', cfg.get('sample_times', 1))))
@@ -224,7 +250,6 @@ if __name__ == '__main__':
 
     if args.is_training:
         for ii in range(args.itr):
-            exp = Exp(args)
             run_name = build_run_name(args, ii)
             current_log_path = log_path(run_name)
 
@@ -232,21 +257,29 @@ if __name__ == '__main__':
                 original_stdout, original_stderr = sys.stdout, sys.stderr
                 sys.stdout = _TeeStream(original_stdout, log_file)
                 sys.stderr = _TeeStream(original_stderr, log_file)
+                run_started_at = time.time()
                 try:
                     print(f'[run] version={run_name}', flush=True)
                     print(f'[run] auto log path: {current_log_path}', flush=True)
+                    print(f'[run] started_at={time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(run_started_at))}', flush=True)
+                    exp = Exp(args)
                     print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(run_name), flush=True)
+                    train_started_at = time.time()
                     exp.train(run_name)
+                    print(f'[timing] train_seconds={time.time() - train_started_at:.3f}', flush=True)
 
                     print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(run_name), flush=True)
+                    test_started_at = time.time()
                     exp.test(run_name)
+                    print(f'[timing] test_seconds={time.time() - test_started_at:.3f}', flush=True)
+                    print(f'[timing] total_run_seconds={time.time() - run_started_at:.3f}', flush=True)
+                    print(f'[run] finished_at={time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}', flush=True)
                 finally:
                     sys.stdout = original_stdout
                     sys.stderr = original_stderr
             torch.cuda.empty_cache()
     else:
         ii = 0
-        exp = Exp(args)
         run_name = build_run_name(args, ii)
         current_log_path = log_path(run_name)
 
@@ -254,11 +287,18 @@ if __name__ == '__main__':
             original_stdout, original_stderr = sys.stdout, sys.stderr
             sys.stdout = _TeeStream(original_stdout, log_file)
             sys.stderr = _TeeStream(original_stderr, log_file)
+            run_started_at = time.time()
             try:
                 print(f'[run] version={run_name}', flush=True)
                 print(f'[run] auto log path: {current_log_path}', flush=True)
+                print(f'[run] started_at={time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(run_started_at))}', flush=True)
+                exp = Exp(args)
                 print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(run_name), flush=True)
+                test_started_at = time.time()
                 exp.test(run_name, test=1)
+                print(f'[timing] test_seconds={time.time() - test_started_at:.3f}', flush=True)
+                print(f'[timing] total_run_seconds={time.time() - run_started_at:.3f}', flush=True)
+                print(f'[run] finished_at={time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())}', flush=True)
             finally:
                 sys.stdout = original_stdout
                 sys.stderr = original_stderr

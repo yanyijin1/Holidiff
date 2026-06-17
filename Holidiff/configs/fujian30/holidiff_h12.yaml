@@ -57,7 +57,7 @@ data_stride: 1
 
 use_lstde: true
 use_sfcn: true
-use_htrc: true
+use_htrc: false
 
 num_bands: 4
 lstde_patch_fusion: concat_proj
@@ -144,6 +144,9 @@ discsdtw: false
 
 extra_tag: ''
 mode: standard
+train_ratio: 0.7
+val_ratio: 0.1
+history_ratio: 0.70
 eval_gamma: 0.5
 eval_delta_t: 1.0
 eval_peak_radius: 1

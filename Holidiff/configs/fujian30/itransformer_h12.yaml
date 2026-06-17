@@ -101,3 +101,6 @@ discsdtw: false
 extra_tag: ''
 mode: standard
 zero_as_missing: true
+train_ratio: 0.7
+val_ratio: 0.1
+history_ratio: 0.70

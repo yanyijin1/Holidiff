@@ -35,6 +35,86 @@ class _StandardScaler:
         return data * self.std + self.mean
 
 
+def split_train_val_test_tail_history(
+    data,
+    train_ratio=0.7,
+    val_ratio=0.1,
+    history_ratio=0.7,
+):
+    """
+    Fixed chronological split with tail-history truncation.
+
+    Full sequence:
+        [0, train_end)       full train
+        [train_end, val_end) validation
+        [val_end, T)         test
+
+    For history_ratio=gamma, train uses:
+        [train_end - gamma*T, train_end)
+
+    Here gamma is defined over the full time series, not over the full train.
+    With train_ratio=0.7, gamma must be in (0, train_ratio].
+    """
+    T = data.shape[0]
+    train_end = int(T * train_ratio)
+    val_end = int(T * (train_ratio + val_ratio))
+
+    if not (0 < history_ratio <= train_ratio):
+        raise ValueError(
+            f'history_ratio must be in (0, {train_ratio}], got {history_ratio}'
+        )
+
+    keep_len = max(1, int(T * history_ratio))
+    train_start = max(0, train_end - keep_len)
+
+    train_data = data[train_start:train_end]
+    val_data = data[train_end:val_end]
+    test_data = data[val_end:]
+
+    split_info = {
+        'T': int(T),
+        'train_ratio': float(train_ratio),
+        'val_ratio': float(val_ratio),
+        'history_ratio': float(history_ratio),
+        'train_start': int(train_start),
+        'train_end': int(train_end),
+        'val_start': int(train_end),
+        'val_end': int(val_end),
+        'test_start': int(val_end),
+        'test_end': int(T),
+        'train_timesteps': int(train_end - train_start),
+        'val_timesteps': int(val_end - train_end),
+        'test_timesteps': int(T - val_end),
+    }
+
+    return train_data, val_data, test_data, split_info
+
+
+def split_train_val_test_tail_history_with_mask(
+    data,
+    valid_mask,
+    train_ratio=0.7,
+    val_ratio=0.1,
+    history_ratio=0.7,
+):
+    train_data, val_data, test_data, split_info = split_train_val_test_tail_history(
+        data=data,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        history_ratio=history_ratio,
+    )
+
+    train_start = split_info['train_start']
+    train_end = split_info['train_end']
+    val_end = split_info['val_end']
+
+    train_mask = valid_mask[train_start:train_end]
+    val_mask = valid_mask[train_end:val_end]
+    test_mask = valid_mask[val_end:]
+
+    return train_data, val_data, test_data, train_mask, val_mask, test_mask, split_info
+
+
 def build_clean_csv(
     csv_path,
     out_csv,
@@ -361,6 +441,9 @@ class TrafficWarehouseCsvDataset(Dataset):
         holiday_col='is_holiday',
         zero_as_missing=False,
         extreme_filter_threshold=None,
+        train_ratio=0.7,
+        val_ratio=0.1,
+        history_ratio=0.7,
     ):
         super().__init__()
         self.split = split
@@ -375,6 +458,9 @@ class TrafficWarehouseCsvDataset(Dataset):
         self.holiday_col = holiday_col
         self.zero_as_missing = zero_as_missing
         self.extreme_filter_threshold = extreme_filter_threshold
+        self.train_ratio = float(train_ratio)
+        self.val_ratio = float(val_ratio)
+        self.history_ratio = float(history_ratio)
 
         df = pd.read_csv(csv_path)
         df[self.time_col] = pd.to_datetime(df[self.time_col])
@@ -393,19 +479,58 @@ class TrafficWarehouseCsvDataset(Dataset):
         self.T_total = raw_data.shape[0]
         self.stations = pivot.columns.to_numpy()
 
-        self.train_end = int(self.T_total * 0.7)
-        self.val_end = int(self.T_total * 0.8)
+        train_data, val_data, test_data, train_mask, val_mask, test_mask, split_info = split_train_val_test_tail_history_with_mask(
+            data=raw_data,
+            valid_mask=valid_mask,
+            train_ratio=self.train_ratio,
+            val_ratio=self.val_ratio,
+            history_ratio=self.history_ratio,
+        )
+        self.split_info = split_info
+        self.train_end = int(split_info['train_end'])
+        self.val_end = int(split_info['val_end'])
+        self.train_start = int(split_info['train_start'])
+        self.train_timesteps = int(split_info['train_timesteps'])
+        self.val_timesteps = int(split_info['val_timesteps'])
+        self.test_timesteps = int(split_info['test_timesteps'])
 
         self.scaler = _StandardScaler()
         if self.scale:
-            self.scaler.fit(raw_data[:self.train_end])
-            self.raw_data = self.scaler.transform(raw_data).astype(np.float32)
+            self.scaler.fit(train_data)
+            train_scaled = self.scaler.transform(train_data).astype(np.float32)
+            val_scaled = self.scaler.transform(val_data).astype(np.float32)
+            test_scaled = self.scaler.transform(test_data).astype(np.float32)
         else:
-            self.raw_data = raw_data
-        self.raw_zero_mask = valid_mask
+            train_scaled = train_data.astype(np.float32)
+            val_scaled = val_data.astype(np.float32)
+            test_scaled = test_data.astype(np.float32)
+
+        if self.split == 'train':
+            self.data = train_scaled
+            self.mask = train_mask.astype(np.float32)
+            self.global_start_offset = self.train_start
+        elif self.split == 'val':
+            self.data = val_scaled
+            self.mask = val_mask.astype(np.float32)
+            self.global_start_offset = self.train_end
+        elif self.split == 'test':
+            self.data = test_scaled
+            self.mask = test_mask.astype(np.float32)
+            self.global_start_offset = self.val_end
+        else:
+            raise ValueError(f'Unknown split: {self.split}')
 
         meta = df.groupby(self.time_col).first().sort_index()
-        self.holiday_flag = meta[self.holiday_col].values.astype(np.float32)
+        holiday_flag = meta[self.holiday_col].values.astype(np.float32)
+        self.train_holiday = holiday_flag[self.train_start:self.train_end]
+        self.val_holiday = holiday_flag[self.train_end:self.val_end]
+        self.test_holiday = holiday_flag[self.val_end:]
+        if self.split == 'train':
+            self.holiday_flag = self.train_holiday
+        elif self.split == 'val':
+            self.holiday_flag = self.val_holiday
+        else:
+            self.holiday_flag = self.test_holiday
 
         self.adj = torch.from_numpy(load_adj(adj_path, default_num_nodes=self.N)).float()
         self.indices = self._build_indices()
@@ -413,27 +538,23 @@ class TrafficWarehouseCsvDataset(Dataset):
 
     def _build_indices(self):
         window_size = self.input_len + self.pred_len
-        all_starts = list(range(0, self.T_total - window_size + 1, self.stride))
+        total_len = self.data.shape[0]
+        if total_len < window_size:
+            return []
+
         valid = []
-        for s in all_starts:
-            e = s + window_size
-            p = s + self.input_len + self.pred_len
+        for local_start in range(0, total_len - window_size + 1, self.stride):
+            e = local_start + window_size
+            p = local_start + self.input_len + self.pred_len
             if self.mode == 'standard':
-                if self.split == 'train' and e <= self.train_end:
-                    valid.append(s)
-                elif self.split == 'val' and self.train_end <= s and e <= self.val_end:
-                    valid.append(s)
-                elif self.split == 'test' and self.val_end <= s:
-                    valid.append(s)
+                valid.append(self.global_start_offset + local_start)
             elif self.mode == 'holiday_probe':
-                whole_window_holiday = self.holiday_flag[s:e].sum() > 0
-                future_holiday = self.holiday_flag[s + self.input_len:p].sum() > 0
-                if self.split == 'train' and e <= self.train_end and not whole_window_holiday:
-                    valid.append(s)
-                elif self.split == 'val' and self.train_end <= s and e <= self.val_end and future_holiday:
-                    valid.append(s)
-                elif self.split == 'test' and self.val_end <= s and future_holiday:
-                    valid.append(s)
+                whole_window_holiday = self.holiday_flag[local_start:e].sum() > 0
+                future_holiday = self.holiday_flag[local_start + self.input_len:p].sum() > 0
+                if self.split == 'train' and not whole_window_holiday:
+                    valid.append(self.global_start_offset + local_start)
+                elif self.split in {'val', 'test'} and future_holiday:
+                    valid.append(self.global_start_offset + local_start)
             else:
                 raise ValueError(f'Unknown mode: {self.mode}')
         return valid
@@ -446,10 +567,11 @@ class TrafficWarehouseCsvDataset(Dataset):
         kept = []
         removed = 0
         for s in self.indices:
-            e = s + self.input_len
+            local_s = s - self.global_start_offset
+            e = local_s + self.input_len
             p = e + self.pred_len
-            seq_x = self.raw_data[s:e]
-            seq_y = self.raw_data[e:p]
+            seq_x = self.data[local_s:e]
+            seq_y = self.data[e:p]
             hist_mean = seq_x.mean(axis=0, keepdims=True)
             hist_std = seq_x.std(axis=0, keepdims=True)
             score = np.max(np.abs((seq_y - hist_mean) / (hist_std + 1e-5)))
@@ -467,11 +589,12 @@ class TrafficWarehouseCsvDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.indices[idx]
-        e = s + self.input_len
+        local_s = s - self.global_start_offset
+        e = local_s + self.input_len
         p = e + self.pred_len
-        x = torch.from_numpy(self.raw_data[s:e]).float()
-        y = torch.from_numpy(self.raw_data[e:p]).float()
-        y_mask = torch.from_numpy(self.raw_zero_mask[e:p]).float()
+        x = torch.from_numpy(self.data[local_s:e]).float()
+        y = torch.from_numpy(self.data[e:p]).float()
+        y_mask = torch.from_numpy(self.mask[e:p]).float()
         holiday_seq = torch.from_numpy(self.holiday_flag[e:p]).float()
         x_mark = torch.zeros(self.input_len, 1)
         y_mark = torch.zeros(self.input_len + self.pred_len, 1)
@@ -503,7 +626,7 @@ class TrafficWarehouseNpyDataset(Dataset):
         }
 
 
-def get_dataloader(csv_path, adj_path, split, mode, input_len=96, pred_len=12, stride=1, batch_size=16, num_workers=4, shuffle=None, scale=True):
+def get_dataloader(csv_path, adj_path, split, mode, input_len=96, pred_len=12, stride=1, batch_size=16, num_workers=4, shuffle=None, scale=True, train_ratio=0.7, val_ratio=0.1, history_ratio=0.7):
     if shuffle is None:
         shuffle = split == 'train'
     ds = TrafficWarehouseCsvDataset(
@@ -515,6 +638,9 @@ def get_dataloader(csv_path, adj_path, split, mode, input_len=96, pred_len=12, s
         pred_len=pred_len,
         stride=stride,
         scale=scale,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        history_ratio=history_ratio,
     )
     print(f'[{mode}] {split}: {len(ds)} samples')
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers, pin_memory=True)

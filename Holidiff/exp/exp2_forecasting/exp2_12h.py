@@ -1,9 +1,10 @@
 from Holidiff.data_provider.data_factory import data_provider
 from Holidiff.data_provider.traffic_warehouse_loader import load_adj
 from Holidiff.exp.exp_basic import Exp_Basic
-from Holidiff.utils.tools import EarlyStopping, adjust_learning_rate
+from Holidiff.utils.tools import EarlyStopping, ReduceLROnPlateauWithWarmup, adjust_learning_rate
 from Holidiff.utils.eval_holiday import evaluate_all
 from Holidiff.utils.run_artifacts import checkpoint_dir, checkpoint_path, result_json_path, result_text_path, test_result_dir
+import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -58,6 +59,9 @@ class Exp2Forecast12H(Exp_Basic):
 
     def _is_tsdiff_model(self):
         return str(getattr(self.args, 'model', '')).lower() == 'tsdiff'
+
+    def _is_diffusionts_model(self):
+        return str(getattr(self.args, 'model', '')).lower() == 'diffusionts'
 
     def _build_model(self):
         model = self.model_dict[self.args.model](self.args).float()
@@ -145,8 +149,37 @@ class Exp2Forecast12H(Exp_Basic):
     # ---------------------------------------------------------------------
     def _select_optimizer(self):
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        if self._is_diffusionts_model():
+            beta1 = float(getattr(self.args, 'diffusion_ts_beta1', 0.9))
+            beta2 = float(getattr(self.args, 'diffusion_ts_beta2', 0.96))
+            return optim.Adam(trainable_params, lr=self.args.learning_rate, betas=(beta1, beta2))
         model_optim = optim.Adam(trainable_params, lr=self.args.learning_rate)
         return model_optim
+
+    @staticmethod
+    def _cycle_loader(loader):
+        while True:
+            for batch in loader:
+                yield batch
+
+    def _build_diffusionts_scheduler(self, optimizer):
+        return ReduceLROnPlateauWithWarmup(
+            optimizer=optimizer,
+            factor=float(getattr(self.args, 'diffusion_ts_scheduler_factor', 0.5)),
+            patience=int(getattr(self.args, 'diffusion_ts_scheduler_patience', 4000)),
+            min_lr=float(getattr(self.args, 'diffusion_ts_scheduler_min_lr', 1.0e-5)),
+            threshold=float(getattr(self.args, 'diffusion_ts_scheduler_threshold', 1.0e-1)),
+            threshold_mode=str(getattr(self.args, 'diffusion_ts_scheduler_threshold_mode', 'rel')),
+            warmup_lr=float(getattr(self.args, 'diffusion_ts_warmup_lr', 8.0e-4)),
+            warmup=int(getattr(self.args, 'diffusion_ts_warmup', 500)),
+            verbose=bool(getattr(self.args, 'diffusion_ts_scheduler_verbose', False)),
+        )
+
+    def _diffusionts_train_num_steps(self, train_loader):
+        grad_accum = max(1, int(getattr(self.args, 'diffusion_ts_gradient_accumulate_every', 2)))
+        batches_per_epoch = max(1, len(train_loader))
+        updates_per_epoch = int(np.ceil(batches_per_epoch / float(grad_accum)))
+        return max(1, int(getattr(self.args, 'diffusion_ts_train_steps', self.args.train_epochs * updates_per_epoch)))
 
     def _select_criterion(self, loss_name='MSE'):
         if loss_name == 'MSE':
@@ -159,6 +192,20 @@ class Exp2Forecast12H(Exp_Basic):
     def _core_model(self):
         return self.model.module if hasattr(self.model, 'module') else self.model
 
+    def _model_param_stats(self):
+        core_model = self._core_model()
+        total = sum(param.numel() for param in core_model.parameters())
+        trainable = sum(param.numel() for param in core_model.parameters() if param.requires_grad)
+        return {
+            'total': int(total),
+            'trainable': int(trainable),
+            'frozen': int(total - trainable),
+        }
+
+    def _sync_cuda(self):
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize(self.device)
+
     def _masked_loss(self, outputs, target, mask, loss_type='MSE'):
         if mask is None:
             if loss_type == 'MSE':
@@ -169,6 +216,72 @@ class Exp2Forecast12H(Exp_Basic):
         else:
             elem = F.l1_loss(outputs, target, reduction='none')
         return (elem * mask).sum() / mask.sum().clamp(min=1)
+
+    def _save_split_info(self, train_data, val_data, test_data):
+        split_info = getattr(train_data, 'split_info', None)
+        if split_info is None:
+            return
+        save_dir = str(getattr(self.args, 'save_dir', '') or '').strip()
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, 'split_info.json'), 'w', encoding='utf-8') as f:
+            json.dump(split_info, f, indent=2, ensure_ascii=False)
+
+    def _normalize_model_name(self):
+        model_name = str(getattr(self.args, 'model', '') or '')
+        if model_name == 'HATEK':
+            return 'RegDiff'
+        return model_name
+
+    def _dataset_identity(self):
+        dataset_name = str(getattr(self.args, 'dataset_name', '') or getattr(self.args, 'model_id', '') or getattr(self.args, 'data', '')).strip()
+        source = ''
+        region = ''
+        parts = dataset_name.split('-')
+        if len(parts) >= 3 and parts[0].upper().startswith('PEMS'):
+            source = parts[0]
+            region = parts[-1]
+        return dataset_name, source, region
+
+    def _append_boundary_metrics_csv(self, payload):
+        csv_path = os.path.join('/root/yanyijin/STdiff', 'results', 'pems_history_boundary_metrics.csv')
+        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        fieldnames = [
+            'dataset', 'source', 'region', 'model', 'history_ratio', 'seed',
+            'mae', 'mse', 'rmse', 'train_timesteps', 'val_timesteps', 'test_timesteps', 'save_dir'
+        ]
+        write_header = not os.path.exists(csv_path)
+        with open(csv_path, 'a', encoding='utf-8', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({key: payload.get(key, '') for key in fieldnames})
+
+    def _save_run_metrics(self, basic_metrics, split_info):
+        save_dir = str(getattr(self.args, 'save_dir', '') or '').strip()
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+        dataset_name, source, region = self._dataset_identity()
+        metrics_payload = {
+            'dataset': dataset_name,
+            'source': source,
+            'region': region,
+            'model': self._normalize_model_name(),
+            'history_ratio': float(getattr(self.args, 'history_ratio', getattr(self.args, 'train_ratio', 0.7))),
+            'seed': int(getattr(self.args, 'seed', 2021)),
+            'mae': float(basic_metrics['mae']),
+            'mse': float(basic_metrics['mse']),
+            'rmse': float(basic_metrics['rmse']),
+            'train_timesteps': int(split_info.get('train_timesteps', 0)) if split_info else 0,
+            'val_timesteps': int(split_info.get('val_timesteps', 0)) if split_info else 0,
+            'test_timesteps': int(split_info.get('test_timesteps', 0)) if split_info else 0,
+            'save_dir': save_dir,
+        }
+        with open(os.path.join(save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
+            json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
+        self._append_boundary_metrics_csv(metrics_payload)
 
 
     # ---------------------------------------------------------------------
@@ -236,8 +349,12 @@ class Exp2Forecast12H(Exp_Basic):
         for key, value in state.items():
             if key not in current_state:
                 continue
-            if current_state[key].shape != value.shape:
-                skipped_missing_shape.append((key, tuple(value.shape), tuple(current_state[key].shape)))
+            current_value = current_state[key]
+            if not isinstance(value, torch.Tensor) or not isinstance(current_value, torch.Tensor):
+                filtered_state[key] = value
+                continue
+            if current_value.shape != value.shape:
+                skipped_missing_shape.append((key, tuple(value.shape), tuple(current_value.shape)))
                 continue
             filtered_state[key] = value
 
@@ -390,6 +507,22 @@ class Exp2Forecast12H(Exp_Basic):
                     total_loss.append(loss.item())
                     continue
 
+                if self._is_diffusionts_model() and bool(getattr(self.args, 'diffusion_ts_validate_with_sampling', False)):
+                    sample_times = self._effective_sample_times(
+                        getattr(self.args, 'diffusion_ts_validation_sample_times', getattr(self.args, 'vs_times', self.args.sample_times)),
+                        getattr(self.args, 'train_val_aggregation_mode', 'single'),
+                    )
+                    core_model = self._core_model()
+                    outputs, _ = core_model(batch_x, sample_times=sample_times)
+                    outputs = self._process_model_output(outputs, is_diff=True)
+                    batch_y = batch_y[:, -self.args.pred_len:, :].to(self.device)
+                    pred = outputs.detach().cpu()
+                    true = batch_y.detach().cpu()
+                    pred_mask = batch_y_mask.detach().cpu() if batch_y_mask is not None else None
+                    loss = self._masked_loss(pred, true, pred_mask, 'MAE')
+                    total_loss.append(loss.item())
+                    continue
+
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
@@ -439,12 +572,55 @@ class Exp2Forecast12H(Exp_Basic):
         return np.average(total_loss)
 
     def train(self, setting):
-        _, train_loader = self._get_data(flag='train')
-        _, vali_loader = self._get_data(flag='val')
-        _, test_loader = self._get_data(flag='test')
+        train_data, train_loader = self._get_data(flag='train')
+        val_data, vali_loader = self._get_data(flag='val')
+        test_data, test_loader = self._get_data(flag='test')
+        self._save_split_info(train_data, val_data, test_data)
+
+        if self._is_diffusionts_model():
+            path = str(checkpoint_dir(self.args.checkpoints, setting, save_dir=getattr(self.args, 'save_dir', '')))
+            if not os.path.exists(path):
+                os.makedirs(path)
+
+            model_optim = self._select_optimizer()
+            scheduler = self._build_diffusionts_scheduler(model_optim)
+            grad_accum = max(1, int(getattr(self.args, 'diffusion_ts_gradient_accumulate_every', 2)))
+            grad_clip = float(getattr(self.args, 'diffusion_ts_grad_clip', 1.0))
+            log_interval = max(1, int(getattr(self.args, 'log_interval', 100)))
+            train_num_steps = self._diffusionts_train_num_steps(train_loader)
+            data_iter = self._cycle_loader(train_loader)
+            train_started_at = time.time()
+            self.model.train()
+            model_optim.zero_grad()
+
+            for step in range(train_num_steps):
+                total_loss = 0.0
+                core_model = self._core_model()
+                for _ in range(grad_accum):
+                    batch = next(data_iter)
+                    batch_x = batch[0].float().to(self.device)
+                    batch_y = batch[1].float().to(self.device)
+                    loss = core_model.training_loss(batch_x, batch_y)
+                    loss = loss / grad_accum
+                    loss.backward()
+                    total_loss += loss.item()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+                model_optim.step()
+                if hasattr(core_model, 'after_optimizer_step'):
+                    core_model.after_optimizer_step()
+                scheduler.step(total_loss)
+                model_optim.zero_grad()
+
+                if (step + 1) % log_interval == 0 or step == 0:
+                    print('\tsteps: {0}/{1} | loss: {2:.7f} | lr: {3:.6e}'.format(
+                        step + 1, train_num_steps, total_loss, model_optim.param_groups[0]['lr']), flush=True)
+
+            torch.save(self.model.state_dict(), path + '/checkpoint.pth')
+            print('DiffusionTS baseline-style training done, time: {:.2f}'.format(time.time() - train_started_at))
+            return self.model
 
         if self._is_tsdiff_model():
-            path = str(checkpoint_dir(self.args.checkpoints, setting))
+            path = str(checkpoint_dir(self.args.checkpoints, setting, save_dir=getattr(self.args, 'save_dir', '')))
             if not os.path.exists(path):
                 os.makedirs(path)
 
@@ -483,7 +659,7 @@ class Exp2Forecast12H(Exp_Basic):
             self.model.load_state_dict(torch.load(best_model_path))
             return self.model
 
-        path = str(checkpoint_dir(self.args.checkpoints, setting))
+        path = str(checkpoint_dir(self.args.checkpoints, setting, save_dir=getattr(self.args, 'save_dir', '')))
         if not os.path.exists(path):
             os.makedirs(path)
 
@@ -599,7 +775,7 @@ class Exp2Forecast12H(Exp_Basic):
                 if getattr(self.args, 'load_checkpoint', ''):
                     checkpoint_path_value = self.args.load_checkpoint
                 else:
-                    checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting))
+                    checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting, save_dir=getattr(self.args, 'save_dir', '')))
                 print('loading model from', checkpoint_path_value)
                 self._load_checkpoint_compat(checkpoint_path_value)
 
@@ -609,6 +785,10 @@ class Exp2Forecast12H(Exp_Basic):
             all_masks = []
             all_histories = []
             all_holidays = []
+            infer_total_seconds = 0.0
+            infer_num_batches = 0
+            param_stats = self._model_param_stats()
+            print('[params] total={total} trainable={trainable} frozen={frozen}'.format(**param_stats))
 
             with torch.no_grad():
                 for batch in test_loader:
@@ -617,12 +797,18 @@ class Exp2Forecast12H(Exp_Basic):
                     batch_y_mask = batch[4] if len(batch) > 4 else None
                     batch_holiday = batch[5] if len(batch) > 5 else None
                     core_model = self._core_model()
+                    self._sync_cuda()
+                    infer_started_at = time.perf_counter()
                     pred = core_model._sample_once(
                         batch_x,
                         int(getattr(self.args, 'tsdiff_sampling_steps', 20)),
                         float(getattr(self.args, 'tsdiff_guidance_scale', 1.0)),
                         float(getattr(self.args, 'tsdiff_guidance_clip', 10.0)),
-                    ).detach().cpu().numpy()
+                    )
+                    self._sync_cuda()
+                    infer_total_seconds += time.perf_counter() - infer_started_at
+                    infer_num_batches += 1
+                    pred = pred.detach().cpu().numpy()
                     true = batch_y[:, -self.args.pred_len:, :].numpy()
                     preds.append(pred)
                     trues.append(true)
@@ -648,11 +834,26 @@ class Exp2Forecast12H(Exp_Basic):
             rmse = np.sqrt(mse)
             basic_metrics = {'mae': mae, 'mse': mse, 'rmse': rmse}
             extra_metrics = self._compute_extra_metrics(preds, trues, histories, holidays, masks, test_data)
+            timing_metrics = {
+                'test_infer_total_seconds': float(infer_total_seconds),
+                'test_infer_avg_batch_seconds': float(infer_total_seconds / max(infer_num_batches, 1)),
+                'test_num_batches': int(infer_num_batches),
+            }
+            print('[timing] test_infer_total_seconds={test_infer_total_seconds:.6f}'.format(**timing_metrics))
+            print('[timing] test_infer_avg_batch_seconds={test_infer_avg_batch_seconds:.6f}'.format(**timing_metrics))
 
             results_txt_path = result_text_path(setting)
             with open(results_txt_path, 'a', encoding='utf-8') as f:
                 f.write(setting + "  \n")
                 self._print_and_write_metrics(f, basic_metrics, extra_metrics)
+                for key, value in param_stats.items():
+                    line = f'param_{key}: {value}'
+                    print(line)
+                    f.write(line + '\n')
+                for key, value in timing_metrics.items():
+                    line = f'{key}: {value}'
+                    print(line)
+                    f.write(line + '\n')
                 f.write('\n')
 
             metrics_path = result_json_path(setting)
@@ -660,17 +861,20 @@ class Exp2Forecast12H(Exp_Basic):
                 'setting': setting,
                 'basic': {k: float(v) for k, v in basic_metrics.items()},
                 'extra': extra_metrics,
+                'params': param_stats,
+                'timing': timing_metrics,
             }
             with open(metrics_path, 'w', encoding='utf-8') as f:
                 json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
 
+            self._save_run_metrics(basic_metrics, getattr(test_data, 'split_info', None))
             return mae, mse, rmse
 
         if test:
             if getattr(self.args, 'load_checkpoint', ''):
                 checkpoint_path_value = self.args.load_checkpoint
             else:
-                checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting))
+                checkpoint_path_value = str(checkpoint_path(self.args.checkpoints, setting, save_dir=getattr(self.args, 'save_dir', '')))
             print('loading model from', checkpoint_path_value)
             self._load_checkpoint_compat(checkpoint_path_value)
 
@@ -696,6 +900,9 @@ class Exp2Forecast12H(Exp_Basic):
         if not os.path.exists(diag_path):
             os.makedirs(diag_path)
 
+        infer_total_seconds = 0.0
+        infer_num_batches = 0
+
         with torch.no_grad():
             for i, batch in enumerate(test_loader):
                 batch_x, batch_y, batch_x_mark, batch_y_mark = batch[0], batch[1], batch[2], batch[3]
@@ -710,6 +917,8 @@ class Exp2Forecast12H(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
+                self._sync_cuda()
+                infer_started_at = time.perf_counter()
                 model_output = self._run_model(
                     self.model,
                     batch_x,
@@ -720,6 +929,9 @@ class Exp2Forecast12H(Exp_Basic):
                     holiday_flag=batch_holiday,
                     future_target=batch_y[:, -self.args.pred_len:, :].to(self.device),
                 )
+                self._sync_cuda()
+                infer_total_seconds += time.perf_counter() - infer_started_at
+                infer_num_batches += 1
                 outputs = model_output[0] if self.args.is_diff else model_output
 
                 outputs = self._process_model_output(outputs, is_diff=self.args.is_diff)
@@ -753,12 +965,29 @@ class Exp2Forecast12H(Exp_Basic):
         rmse = np.sqrt(mse)
         basic_metrics = {'mae': mae, 'mse': mse, 'rmse': rmse}
         extra_metrics = self._compute_extra_metrics(preds, trues, histories, holidays, masks, test_data)
+        timing_metrics = {
+            'test_infer_total_seconds': float(infer_total_seconds),
+            'test_infer_avg_batch_seconds': float(infer_total_seconds / max(infer_num_batches, 1)),
+            'test_num_batches': int(infer_num_batches),
+        }
+        param_stats = self._model_param_stats()
+        print('[params] total={total} trainable={trainable} frozen={frozen}'.format(**param_stats))
+        print('[timing] test_infer_total_seconds={test_infer_total_seconds:.6f}'.format(**timing_metrics))
+        print('[timing] test_infer_avg_batch_seconds={test_infer_avg_batch_seconds:.6f}'.format(**timing_metrics))
 
         results_txt_path = result_text_path(setting)
 
         with open(results_txt_path, 'a', encoding='utf-8') as f:
             f.write(setting + "  \n")
             self._print_and_write_metrics(f, basic_metrics, extra_metrics)
+            for key, value in param_stats.items():
+                line = f'param_{key}: {value}'
+                print(line)
+                f.write(line + '\n')
+            for key, value in timing_metrics.items():
+                line = f'{key}: {value}'
+                print(line)
+                f.write(line + '\n')
             f.write('\n')
 
         metrics_path = result_json_path(setting)
@@ -766,11 +995,14 @@ class Exp2Forecast12H(Exp_Basic):
             'setting': setting,
             'basic': {k: float(v) for k, v in basic_metrics.items()},
             'extra': extra_metrics,
+            'params': param_stats,
+            'timing': timing_metrics,
         }
         with open(metrics_path, 'w', encoding='utf-8') as f:
             json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
 
         self._restore_model_aggregation_mode(previous_aggregation_mode)
+        self._save_run_metrics(basic_metrics, getattr(test_data, 'split_info', None))
         return mae, mse, rmse
 
 

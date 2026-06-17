@@ -48,13 +48,17 @@ def load_rows(path: Path) -> list[dict]:
             else float(dyn_raw)
         )
 
+        mae_full_raw = r.get("mae_full", "")
+        mae_removed_raw = r.get("mae_removed", "")
+        delta_raw = r.get("delta", "") or r.get("delta_mae", "")
+
         parsed.append(
             {
                 "band": int(r["band"]),
                 "interpretation": r["interpretation"],
-                "mae_full": float(r["mae_full"]),
-                "mae_removed": float(r["mae_removed"]),
-                "delta": float(r["delta"]),
+                "mae_full": None if mae_full_raw in ("", None) else float(mae_full_raw),
+                "mae_removed": None if mae_removed_raw in ("", None) else float(mae_removed_raw),
+                "delta": float(delta_raw),
                 "contribution_all": float(r["contribution_all"]),
                 "contribution_dynamic": contribution_dynamic,
                 "is_dynamic_band": str(r.get("is_dynamic_band", "")).lower() == "true",

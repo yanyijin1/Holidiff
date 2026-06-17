@@ -12,6 +12,10 @@ TEST_RESULT_DIR = PROJECT_ROOT / 'test_results'
 
 
 def build_run_name(args, iteration: int = 0) -> str:
+    save_dir = str(getattr(args, 'save_dir', '') or '').strip()
+    if save_dir:
+        return Path(save_dir).name
+
     version = str(getattr(args, 'version', '') or '').strip()
     if version:
         if getattr(args, 'itr', 1) > 1:
@@ -55,12 +59,14 @@ def log_path(run_name: str) -> Path:
     return ensure_dir(LOG_DIR) / f'{run_name}.log'
 
 
-def checkpoint_dir(checkpoints_root: str | Path, run_name: str) -> Path:
+def checkpoint_dir(checkpoints_root: str | Path, run_name: str, save_dir: str | Path = '') -> Path:
+    if str(save_dir or '').strip():
+        return ensure_dir(Path(save_dir))
     return ensure_dir(Path(checkpoints_root) / run_name)
 
 
-def checkpoint_path(checkpoints_root: str | Path, run_name: str) -> Path:
-    return checkpoint_dir(checkpoints_root, run_name) / 'checkpoint.pth'
+def checkpoint_path(checkpoints_root: str | Path, run_name: str, save_dir: str | Path = '') -> Path:
+    return checkpoint_dir(checkpoints_root, run_name, save_dir=save_dir) / 'checkpoint.pth'
 
 
 def result_text_path(run_name: str) -> Path:

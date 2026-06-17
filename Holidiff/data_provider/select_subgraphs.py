@@ -11,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EPS = 1e-8
 
 
 def load_flow(npz_path):
@@ -291,7 +290,7 @@ def evaluate_candidate(clean, valid_mask, neighbors, nodes, seq_len=96, pred_len
     }
 
 
-def generate_ego_candidates(clean, valid_mask, neighbors, sizes=(30, 40), seq_len=96, pred_len=12, stride=12, train_ratio=0.7, val_ratio=0.1, day_len=288, max_r=30.0, max_low_var=0.20, min_valid=0.98):
+def generate_ego_candidates(clean, valid_mask, neighbors, sizes=(30,), seq_len=96, pred_len=12, stride=12, train_ratio=0.7, val_ratio=0.1, day_len=288, max_r=30.0, max_low_var=0.20, min_valid=0.98):
     rows = []
     seen = set()
     for size in sizes:
@@ -328,12 +327,108 @@ def slice_head_fraction(data, fraction):
     return data[:keep_len]
 
 
+def parse_nodes(nodes_str):
+    return [int(x) for x in str(nodes_str).split(',') if str(x).strip() != '']
+
+
+def node_overlap_ratio(nodes_a, nodes_b):
+    a = set(map(int, nodes_a))
+    b = set(map(int, nodes_b))
+    return len(a & b) / max(1, min(len(a), len(b)))
+
+
+def select_diverse_quality_candidates(df, size=30, num_regions=5, overlap_threshold=0.5, seed=2026):
+    rng = np.random.default_rng(seed)
+
+    cand = df[(df['quality_ok']) & (df['size'] == size)].copy()
+    if len(cand) == 0:
+        raise ValueError(f'No quality candidates found for size={size}')
+
+    cand = cand.sort_values('RankScore', ascending=True).reset_index(drop=True)
+
+    bins = np.array_split(cand.index.to_numpy(), num_regions)
+
+    selected_rows = []
+    selected_nodes = []
+
+    for bin_idx in bins:
+        if len(bin_idx) == 0:
+            continue
+
+        sub = cand.loc[bin_idx].copy()
+        sub['bin_center_dist'] = np.abs(sub['RankScore'] - sub['RankScore'].median())
+        sub = sub.sort_values(['bin_center_dist', 'RankScore'], ascending=[True, False])
+
+        top_pool = sub.head(min(10, len(sub))).sample(
+            frac=1.0,
+            random_state=int(rng.integers(0, 1_000_000)),
+        )
+
+        chosen = None
+        for _, row in top_pool.iterrows():
+            nodes = parse_nodes(row['nodes'])
+            if all(node_overlap_ratio(nodes, prev) <= overlap_threshold for prev in selected_nodes):
+                chosen = row
+                selected_nodes.append(nodes)
+                break
+
+        if chosen is None:
+            best_row = None
+            best_overlap = float('inf')
+            for _, row in sub.iterrows():
+                nodes = parse_nodes(row['nodes'])
+                overlap = max(
+                    [node_overlap_ratio(nodes, prev) for prev in selected_nodes],
+                    default=0.0,
+                )
+                if overlap < best_overlap:
+                    best_overlap = overlap
+                    best_row = row
+
+            chosen = best_row
+            selected_nodes.append(parse_nodes(chosen['nodes']))
+
+        selected_rows.append(chosen)
+
+    selected = pd.DataFrame(selected_rows).reset_index(drop=True)
+
+    if len(selected) < num_regions:
+        selected_node_sets = [parse_nodes(row['nodes']) for _, row in selected.iterrows()]
+        selected_keys = set(selected['nodes'].astype(str).tolist())
+
+        remaining = cand[~cand['nodes'].astype(str).isin(selected_keys)].copy()
+        remaining = remaining.sample(frac=1.0, random_state=seed)
+
+        for _, row in remaining.iterrows():
+            nodes = parse_nodes(row['nodes'])
+            if all(node_overlap_ratio(nodes, prev) <= overlap_threshold for prev in selected_node_sets):
+                selected = pd.concat([selected, row.to_frame().T], ignore_index=True)
+                selected_node_sets.append(nodes)
+
+            if len(selected) >= num_regions:
+                break
+
+    if len(selected) < num_regions:
+        raise RuntimeError(
+            f'Only selected {len(selected)} regions, fewer than required {num_regions}. '
+            f'Try increasing overlap_threshold or relaxing quality filters.'
+        )
+
+    return selected.head(num_regions).reset_index(drop=True)
+
+
 def write_local_dataset(name, out_root, clean, nodes, neighbors, source_node_ids, stats=None, data_fraction=1.0):
+    if abs(float(data_fraction) - 1.0) > 1e-8:
+        raise ValueError(
+            'For PeMS applicability-boundary experiments, subgraph generation '
+            'must use full time series. Please keep data_fraction=1.0 and use '
+            '--history_ratio in training.'
+        )
+
     out_dir = out_root / name
     warehouse = out_dir / 'warehouse'
     warehouse.mkdir(parents=True, exist_ok=True)
     local_data = clean[:, nodes]
-    local_data = slice_head_fraction(local_data, data_fraction)
     time_index = pd.date_range('2000-01-01 00:00:00', periods=local_data.shape[0], freq='5min')
     rows = []
     for local_idx in range(len(nodes)):
@@ -346,36 +441,53 @@ def write_local_dataset(name, out_root, clean, nodes, neighbors, source_node_ids
     if stats is not None:
         stats = dict(stats)
         stats['data_fraction'] = float(data_fraction)
-        stats['data_fraction_anchor'] = 'head'
+        stats['data_fraction_anchor'] = 'full_series'
         stats['written_timesteps'] = int(local_data.shape[0])
         with open(out_dir / 'candidate_diagnostics.json', 'w', encoding='utf-8') as f:
             json.dump(stats, f, indent=2, ensure_ascii=False)
     return out_dir
 
 
-def write_top_candidates(df, output_root, source, clean, neighbors, node_ids, top_k_per_size=3, name_prefix='Amb', data_fraction=1.0):
+def write_selected_candidates(selected_df, output_root, source, clean, neighbors, node_ids, name_prefix='R30'):
     written = []
-    for size, group in df[df['quality_ok']].groupby('size'):
-        top = group.sort_values('RankScore', ascending=False).head(top_k_per_size)
-        for rank, (_, row) in enumerate(top.iterrows(), start=1):
-            nodes = np.asarray([int(x) for x in row['nodes'].split(',')], dtype=np.int64)
-            name = f'{source}-{name_prefix}-L{int(size)}-{rank:03d}'
-            stats = row.to_dict()
-            out_dir = write_local_dataset(name=name, out_root=output_root, clean=clean, nodes=nodes, neighbors=neighbors, source_node_ids=node_ids, stats=stats, data_fraction=data_fraction)
-            written.append({
-                'dataset': name,
-                'path': str(out_dir),
-                'size': int(size),
-                'rank': rank,
-                'data_fraction': float(data_fraction),
-                'RankScore': float(row['RankScore']),
-                'ConditionalStateAmbiguity': float(row['ConditionalStateAmbiguity']),
-                'FutureModeSeparation': float(row['FutureModeSeparation']),
-                'StateBalance': float(row['StateBalance']),
-                'SpatialStateDisagreement': float(row['SpatialStateDisagreement']),
-                'Rmax': float(row['Rmax']),
-                'low_var_window_ratio': float(row['low_var_window_ratio']),
-            })
+
+    for rank, (_, row) in enumerate(selected_df.iterrows(), start=1):
+        nodes = np.asarray(parse_nodes(row['nodes']), dtype=np.int64)
+        name = f'{source}-{name_prefix}-{rank:03d}'
+
+        stats = row.to_dict()
+        out_dir = write_local_dataset(
+            name=name,
+            out_root=output_root,
+            clean=clean,
+            nodes=nodes,
+            neighbors=neighbors,
+            source_node_ids=node_ids,
+            stats=stats,
+            data_fraction=1.0,
+        )
+
+        written.append({
+            'dataset': name,
+            'path': str(out_dir),
+            'size': int(row['size']),
+            'rank': int(rank),
+            'anchor': int(row['anchor']) if 'anchor' in row else -1,
+            'RankScore': float(row['RankScore']),
+            'ConditionalStateAmbiguity': float(row['ConditionalStateAmbiguity']),
+            'FutureModeSeparation': float(row['FutureModeSeparation']),
+            'StateBalance': float(row['StateBalance']),
+            'SpatialStateDisagreement': float(row['SpatialStateDisagreement']),
+            'Rmax': float(row['Rmax']),
+            'R95': float(row['R95']),
+            'R99': float(row['R99']),
+            'low_var_window_ratio': float(row['low_var_window_ratio']),
+            'mean_valid_rate': float(row['mean_valid_rate']),
+            'diameter': float(row['diameter']),
+            'avg_degree': float(row['avg_degree']),
+            'nodes': row['nodes'],
+        })
+
     return pd.DataFrame(written)
 
 
@@ -385,7 +497,7 @@ def main():
     parser.add_argument('--output_root', type=str, default='/root/autodl-tmp/STdiff_data/datasets')
     parser.add_argument('--candidate_root', type=str, default='/root/autodl-tmp/STdiff_data/candidates')
     parser.add_argument('--source', type=str, default='PEMS08')
-    parser.add_argument('--sizes', type=int, nargs='+', default=[30, 40])
+    parser.add_argument('--sizes', type=int, nargs='+', default=[30])
     parser.add_argument('--seq_len', type=int, default=96)
     parser.add_argument('--pred_len', type=int, default=12)
     parser.add_argument('--stride', type=int, default=12)
@@ -395,10 +507,20 @@ def main():
     parser.add_argument('--max_r', type=float, default=30.0)
     parser.add_argument('--max_low_var', type=float, default=0.20)
     parser.add_argument('--min_valid', type=float, default=0.98)
-    parser.add_argument('--top_k_per_size', type=int, default=3)
-    parser.add_argument('--name_prefix', type=str, default='Amb')
+    parser.add_argument('--num_regions', type=int, default=5)
+    parser.add_argument('--overlap_threshold', type=float, default=0.5)
+    parser.add_argument('--seed', type=int, default=2026)
+    parser.add_argument('--name_prefix', type=str, default='R30')
     parser.add_argument('--data_fraction', type=float, default=1.0)
     args = parser.parse_args()
+
+    if set(args.sizes) != {30}:
+        raise ValueError('This script is restricted to 30-node connected subgraphs. Please use --sizes 30.')
+    if abs(float(args.data_fraction) - 1.0) > 1e-8:
+        raise ValueError(
+            'Subgraph generation must use the full time series. '
+            'Keep --data_fraction 1.0 and use --history_ratio during training.'
+        )
 
     data_root = Path(args.data_root)
     output_root = Path(args.output_root)
@@ -425,7 +547,21 @@ def main():
     clean, valid_mask = interpolate_invalid(raw)
     neighbors = load_graph(adj_path, node_ids)
     print('Generating deterministic connected ego-subgraph candidates...', flush=True)
-    df = generate_ego_candidates(clean=clean, valid_mask=valid_mask, neighbors=neighbors, sizes=tuple(args.sizes), seq_len=args.seq_len, pred_len=args.pred_len, stride=args.stride, train_ratio=args.train_ratio, val_ratio=args.val_ratio, day_len=args.day_len, max_r=args.max_r, max_low_var=args.max_low_var, min_valid=args.min_valid)
+    df = generate_ego_candidates(
+        clean=clean,
+        valid_mask=valid_mask,
+        neighbors=neighbors,
+        sizes=tuple(args.sizes),
+        seq_len=args.seq_len,
+        pred_len=args.pred_len,
+        stride=args.stride,
+        train_ratio=args.train_ratio,
+        val_ratio=args.val_ratio,
+        day_len=args.day_len,
+        max_r=args.max_r,
+        max_low_var=args.max_low_var,
+        min_valid=args.min_valid,
+    )
     if len(df) == 0:
         print('No candidates generated.', flush=True)
         return
@@ -434,15 +570,41 @@ def main():
     df.to_csv(out_summary, index=False)
     print(f'Candidate summary saved to: {out_summary}', flush=True)
 
-    print('Top candidates by size:', flush=True)
-    for size, group in df[df['quality_ok']].groupby('size'):
-        cols = ['anchor', 'size', 'RankScore', 'ConditionalStateAmbiguity', 'FutureModeSeparation', 'StateBalance', 'SpatialStateDisagreement', 'Rmax', 'low_var_window_ratio', 'diameter']
-        print(group[cols].head(args.top_k_per_size).to_string(index=False), flush=True)
+    selected_df = select_diverse_quality_candidates(
+        df=df,
+        size=30,
+        num_regions=args.num_regions,
+        overlap_threshold=args.overlap_threshold,
+        seed=args.seed,
+    )
 
-    written_df = write_top_candidates(df=df, output_root=output_root, source=source, clean=clean, neighbors=neighbors, node_ids=node_ids, top_k_per_size=args.top_k_per_size, name_prefix=args.name_prefix, data_fraction=args.data_fraction)
-    out_written = candidate_root / f'{source}_written_top_{args.name_prefix}_subgraphs.csv'
+    selected_summary = candidate_root / f'{source}_selected_R30_subgraphs.csv'
+    selected_df.to_csv(selected_summary, index=False)
+    print(f'Selected R30 summary saved to: {selected_summary}', flush=True)
+
+    cols = [
+        'anchor', 'size', 'RankScore',
+        'ConditionalStateAmbiguity', 'FutureModeSeparation',
+        'StateBalance', 'SpatialStateDisagreement',
+        'Rmax', 'R95', 'R99',
+        'low_var_window_ratio', 'mean_valid_rate',
+        'diameter', 'avg_degree',
+    ]
+    print(selected_df[cols].to_string(index=False), flush=True)
+
+    written_df = write_selected_candidates(
+        selected_df=selected_df,
+        output_root=output_root,
+        source=source,
+        clean=clean,
+        neighbors=neighbors,
+        node_ids=node_ids,
+        name_prefix=args.name_prefix,
+    )
+
+    out_written = candidate_root / f'{source}_written_R30_subgraphs.csv'
     written_df.to_csv(out_written, index=False)
-    print(f'Written datasets saved to: {out_written}', flush=True)
+    print(f'Written R30 datasets saved to: {out_written}', flush=True)
     print(written_df.to_string(index=False), flush=True)
 
 

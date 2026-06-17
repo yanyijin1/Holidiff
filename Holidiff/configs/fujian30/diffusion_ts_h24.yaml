@@ -32,12 +32,12 @@ dec_in: 30
 c_out: 30
 
 # minimal host compatibility fields
-network_profile: base
-d_model: 128
-n_heads: 8
+network_profile: tiny
+d_model: 64
+n_heads: 4
 e_layers: 1
 d_layers: 1
-d_ff: 512
+d_ff: 128
 expand: 2
 d_conv: 4
 factor: 1
@@ -53,20 +53,41 @@ is_diff: 1
 loss_type: MAE
 diffusion_ts_seq_length: 120
 diffusion_ts_feature_size: 30
-diffusion_ts_timesteps: 1000
-diffusion_ts_sampling_timesteps: 20
+diffusion_ts_timesteps: 500
+diffusion_ts_sampling_timesteps: 200
 diffusion_ts_loss_type: l1
 diffusion_ts_beta_schedule: cosine
 diffusion_ts_n_layer_enc: 3
-diffusion_ts_n_layer_dec: 6
-diffusion_ts_d_model: 128
-diffusion_ts_n_heads: 8
+diffusion_ts_n_layer_dec: 2
+diffusion_ts_d_model: 64
+diffusion_ts_n_heads: 4
 diffusion_ts_mlp_hidden_times: 4
 diffusion_ts_eta: 0.0
 diffusion_ts_attn_pd: 0.0
 diffusion_ts_resid_pd: 0.0
 diffusion_ts_use_ff: true
 diffusion_ts_reg_weight: null
+diffusion_ts_clip_denoised: false
+diffusion_ts_use_ema: true
+diffusion_ts_use_ema_sampling: true
+diffusion_ts_ema_decay: 0.995
+diffusion_ts_ema_update_every: 10
+diffusion_ts_beta1: 0.9
+diffusion_ts_beta2: 0.96
+diffusion_ts_langevin_coef: 0.01
+diffusion_ts_langevin_lr: 0.05
+diffusion_ts_langevin_coef_inner: 0.0
+diffusion_ts_validate_with_sampling: false
+diffusion_ts_validation_sample_times: 1
+diffusion_ts_gradient_accumulate_every: 2
+diffusion_ts_grad_clip: 1.0
+diffusion_ts_scheduler_factor: 0.5
+diffusion_ts_scheduler_patience: 4000
+diffusion_ts_scheduler_min_lr: 1.0e-5
+diffusion_ts_scheduler_threshold: 0.1
+diffusion_ts_scheduler_threshold_mode: rel
+diffusion_ts_warmup_lr: 8.0e-4
+diffusion_ts_warmup: 500
 
 # evaluation / sampling
 sample_times: 1
@@ -75,14 +96,14 @@ vs_times: 1
 # run
 num_workers: 0
 itr: 1
-train_epochs: 100
+train_epochs: 30
 batch_size: 32
 eval_batch_size: 128
 patience: 20
 learning_rate: 0.0001
 des: DiffusionTS
 loss: MSE
-lradj: type1
+lradj: constant
 use_amp: false
 log_interval: 100
 
